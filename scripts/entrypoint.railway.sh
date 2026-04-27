@@ -1,35 +1,23 @@
 #!/usr/bin/env bash
 # Railway entrypoint. На Railway PG и Redis — managed-сервисы,
 # готовы к моменту старта приложения. wait-for-services не требуется.
-# Печатаем только не-секретные параметры окружения.
+#
+# Перед стартом запускаем scripts/railway_diagnose.py: он подгружает Settings,
+# распознаёт любой поддерживаемый формат env-переменных Postgres/Redis
+# (DATABASE_URL, POSTGRES_URL, DATABASE_PRIVATE_URL, DATABASE_PUBLIC_URL,
+# PGHOST+PGPORT+..., REDIS_URL, REDIS_PRIVATE_URL, REDIS_PUBLIC_URL,
+# REDISHOST+...), печатает безопасную сводку (без паролей) и падает с
+# понятной инструкцией, если ничего не найдено.
 
 set -euo pipefail
 
-echo "[entrypoint.railway] APP_ENV=${APP_ENV:-railway}"
-echo "[entrypoint.railway] TELEGRAM_MODE=${TELEGRAM_MODE:-polling}"
-echo "[entrypoint.railway] OPENROUTER_MODEL=${OPENROUTER_MODEL:-openai/gpt-4.1-mini}"
-echo "[entrypoint.railway] PORT=${PORT:-8000}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+export PYTHONPATH="${PYTHONPATH:-/app}"
+
+"${PYTHON_BIN}" scripts/railway_diagnose.py
 
 if [[ -z "${TELEGRAM_MODE:-}" ]]; then
     export TELEGRAM_MODE="polling"
-fi
-
-if [[ -z "${DATABASE_URL:-}" ]]; then
-    echo "[entrypoint.railway] ERROR: DATABASE_URL is empty. Configure Postgres reference variable." >&2
-    exit 1
-fi
-
-if [[ -z "${REDIS_URL:-}" ]]; then
-    echo "[entrypoint.railway] ERROR: REDIS_URL is empty. Configure Redis reference variable." >&2
-    exit 1
-fi
-
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-    echo "[entrypoint.railway] WARNING: TELEGRAM_BOT_TOKEN is empty — polling will not start." >&2
-fi
-
-if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-    echo "[entrypoint.railway] WARNING: OPENROUTER_API_KEY is empty — bot will reply with 'key not configured'." >&2
 fi
 
 echo "[entrypoint.railway] running alembic upgrade head..."

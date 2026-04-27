@@ -2,6 +2,11 @@
 
 Все настройки приходят из переменных окружения / .env-файла.
 Никакие секреты в коде не хранятся и не логируются.
+
+Резолвер DSN толерантен к разным форматам: поддерживает Railway (DATABASE_URL,
+PGHOST+PGPORT+..., REDIS_URL, REDISHOST+REDISPORT+...), Compose (POSTGRES_*),
+а также public/private-варианты Railway (DATABASE_PRIVATE_URL,
+DATABASE_PUBLIC_URL, REDIS_PRIVATE_URL, REDIS_PUBLIC_URL).
 """
 
 from __future__ import annotations
@@ -10,9 +15,9 @@ import logging
 import os
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse, urlunparse
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +27,64 @@ class ConfigError(RuntimeError):
 
 AppEnv = Literal["local", "railway", "production"]
 TelegramMode = Literal["polling", "webhook"]
+
+
+# Префикс asyncpg-драйвера для SQLAlchemy.
+_ASYNC_DRIVER_PREFIX = "postgresql+asyncpg://"
+_NATIVE_PG_PREFIXES = ("postgresql://", "postgres://")
+
+
+def mask_url_password(url: str) -> str:
+    """Маскирует пароль в DSN перед безопасной печатью.
+
+    Возвращает исходную строку, если распарсить не удалось — но без пароля.
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return "<unparseable>"
+    if not parsed.password:
+        return url
+    user = parsed.username or ""
+    host = parsed.hostname or ""
+    netloc = ""
+    if user:
+        netloc += user
+        netloc += ":***"
+        netloc += "@"
+    netloc += host
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def normalize_to_asyncpg(url: str) -> str:
+    """Возвращает DSN с явным драйвером asyncpg для async SQLAlchemy."""
+    if not url:
+        return ""
+    if url.startswith(_ASYNC_DRIVER_PREFIX):
+        return url
+    if url.startswith("postgres://"):
+        return _ASYNC_DRIVER_PREFIX + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return _ASYNC_DRIVER_PREFIX + url[len("postgresql://") :]
+    return url
+
+
+def normalize_to_native(url: str) -> str:
+    """Возвращает каноничный native DSN c префиксом postgresql://.
+
+    Приводит `postgresql+asyncpg://` и `postgres://` к `postgresql://`.
+    """
+    if not url:
+        return ""
+    if url.startswith(_ASYNC_DRIVER_PREFIX):
+        return "postgresql://" + url[len(_ASYNC_DRIVER_PREFIX) :]
+    if url.startswith("postgres://"):
+        return "postgresql://" + url[len("postgres://") :]
+    return url
 
 
 class Settings(BaseSettings):
@@ -62,16 +125,39 @@ class Settings(BaseSettings):
     RATE_LIMIT_MESSAGES: int = 30
     RATE_LIMIT_WINDOW_SECONDS: int = 3600
 
-    # --- Database ---
+    # --- Database (полный набор поддерживаемых источников) ---
     DATABASE_URL: str = ""
+    POSTGRES_URL: str = ""
+    DATABASE_PRIVATE_URL: str = ""
+    DATABASE_PUBLIC_URL: str = ""
+
+    # Railway-стиль (libpq-совместимый набор).
+    PGHOST: str = ""
+    PGPORT: int | None = None
+    PGUSER: str = ""
+    PGPASSWORD: str = ""
+    PGDATABASE: str = ""
+
+    # Compose-стиль (текущий дефолт docker-compose).
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "telegram_ai_core"
     POSTGRES_USER: str = "telegram_ai_core"
     POSTGRES_PASSWORD: str = "telegram_ai_core_password"
 
-    # --- Redis ---
+    # --- Redis (полный набор поддерживаемых источников) ---
     REDIS_URL: str = ""
+    REDIS_PRIVATE_URL: str = ""
+    REDIS_PUBLIC_URL: str = ""
+
+    REDISHOST: str = ""
+    REDISPORT: int | None = None
+    REDISUSER: str = ""
+    REDISPASSWORD: str = ""
+
+    # --- Diagnostics ---
+    # Если задан, эндпоинт /diagnostics требует X-Diagnostics-Token.
+    DIAGNOSTICS_TOKEN: str = ""
 
     # --- Renderer ---
     TELEGRAM_DRAFT_MIN_INTERVAL_MS: int = 500
@@ -92,39 +178,135 @@ class Settings(BaseSettings):
             return int(self.SERVER_PORT)
         return 8000
 
-    @property
-    def effective_database_url(self) -> str:
-        """Возвращает фактический DATABASE_URL с asyncpg-драйвером.
+    # --- Postgres ---
 
-        Если переменная не задана, собираем из POSTGRES_*.
+    def _resolve_postgres(self) -> tuple[str, str]:
+        """Возвращает (native_url, connection_source).
+
+        Native URL — без +asyncpg, с префиксом postgresql://. Если ни один
+        источник не сработал — ("", "none").
         """
         if self.DATABASE_URL:
-            return self._normalize_database_url(self.DATABASE_URL)
+            return normalize_to_native(self.DATABASE_URL), "DATABASE_URL"
+        if self.POSTGRES_URL:
+            return normalize_to_native(self.POSTGRES_URL), "POSTGRES_URL"
+        if self.DATABASE_PRIVATE_URL:
+            return (
+                normalize_to_native(self.DATABASE_PRIVATE_URL),
+                "DATABASE_PRIVATE_URL",
+            )
+        if self.DATABASE_PUBLIC_URL:
+            return (
+                normalize_to_native(self.DATABASE_PUBLIC_URL),
+                "DATABASE_PUBLIC_URL",
+            )
 
-        if not (self.POSTGRES_HOST and self.POSTGRES_DB and self.POSTGRES_USER):
-            return ""
+        # Railway-стиль libpq.
+        if self.PGHOST and self.PGUSER and self.PGDATABASE:
+            port = self.PGPORT or 5432
+            user = quote_plus(self.PGUSER)
+            password = quote_plus(self.PGPASSWORD or "")
+            netloc = f"{user}:{password}@{self.PGHOST}:{port}" if password else (
+                f"{user}@{self.PGHOST}:{port}"
+            )
+            return (
+                f"postgresql://{netloc}/{self.PGDATABASE}",
+                "PGHOST+PGPORT+PGUSER+PGPASSWORD+PGDATABASE",
+            )
 
-        password = quote_plus(self.POSTGRES_PASSWORD or "")
-        user = quote_plus(self.POSTGRES_USER)
-        return (
-            f"postgresql+asyncpg://{user}:{password}@"
-            f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        )
+        # Compose-стиль (POSTGRES_*) — последний приоритет.
+        if self.POSTGRES_HOST and self.POSTGRES_USER and self.POSTGRES_DB:
+            user = quote_plus(self.POSTGRES_USER)
+            password = quote_plus(self.POSTGRES_PASSWORD or "")
+            netloc = (
+                f"{user}:{password}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}"
+                if password
+                else f"{user}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}"
+            )
+            return (
+                f"postgresql://{netloc}/{self.POSTGRES_DB}",
+                "POSTGRES_HOST+POSTGRES_PORT+POSTGRES_USER+POSTGRES_PASSWORD+POSTGRES_DB",
+            )
 
-    @staticmethod
-    def _normalize_database_url(url: str) -> str:
-        """Заменяет схему на postgresql+asyncpg, если она не задана явно.
+        return "", "none"
 
-        Railway/Heroku обычно отдают postgresql:// — асинхронный движок
-        SQLAlchemy требует драйверный префикс.
-        """
-        if url.startswith("postgresql+asyncpg://"):
-            return url
-        if url.startswith("postgres://"):
-            return "postgresql+asyncpg://" + url[len("postgres://") :]
-        if url.startswith("postgresql://"):
-            return "postgresql+asyncpg://" + url[len("postgresql://") :]
+    @property
+    def database_url_native(self) -> str:
+        """Native PostgreSQL DSN без драйверного префикса (для asyncpg/psql)."""
+        url, _ = self._resolve_postgres()
         return url
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        """DSN для async-SQLAlchemy (postgresql+asyncpg://...)."""
+        url, _ = self._resolve_postgres()
+        return normalize_to_asyncpg(url)
+
+    @property
+    def alembic_url(self) -> str:
+        """DSN для Alembic.
+
+        Alembic-env у нас работает через async_engine_from_config, так что
+        нам нужен driver-prefix +asyncpg. При ручных операциях
+        (alembic stamp / DDL-скрипты) можно взять database_url_native.
+        """
+        return self.sqlalchemy_url
+
+    @property
+    def effective_database_url(self) -> str:
+        """Backward-compatible alias: DSN с asyncpg-драйвером."""
+        return self.sqlalchemy_url
+
+    @property
+    def postgres_connection_source(self) -> str:
+        """Источник, из которого собран DSN. 'none' — если не собрался."""
+        _, source = self._resolve_postgres()
+        return source
+
+    # --- Redis ---
+
+    def _resolve_redis(self) -> tuple[str, str]:
+        """Возвращает (redis_url, connection_source)."""
+        if self.REDIS_URL:
+            return self.REDIS_URL, "REDIS_URL"
+        if self.REDIS_PRIVATE_URL:
+            return self.REDIS_PRIVATE_URL, "REDIS_PRIVATE_URL"
+        if self.REDIS_PUBLIC_URL:
+            return self.REDIS_PUBLIC_URL, "REDIS_PUBLIC_URL"
+
+        if self.REDISHOST:
+            port = self.REDISPORT or 6379
+            user = quote_plus(self.REDISUSER) if self.REDISUSER else ""
+            password = quote_plus(self.REDISPASSWORD) if self.REDISPASSWORD else ""
+            if user or password:
+                auth = f"{user}:{password}@" if password else f"{user}@"
+            else:
+                auth = ""
+            return (
+                f"redis://{auth}{self.REDISHOST}:{port}/0",
+                "REDISHOST+REDISPORT+REDISUSER+REDISPASSWORD",
+            )
+
+        return "", "none"
+
+    @property
+    def effective_redis_url(self) -> str:
+        url, _ = self._resolve_redis()
+        return url
+
+    @property
+    def redis_connection_source(self) -> str:
+        _, source = self._resolve_redis()
+        return source
+
+    # --- Connection sources (для diagnostics endpoint) ---
+
+    @property
+    def connection_sources(self) -> dict[str, str]:
+        return {
+            "postgres": self.postgres_connection_source,
+            "redis": self.redis_connection_source,
+        }
 
     @property
     def is_strict_env(self) -> bool:
@@ -139,28 +321,33 @@ class Settings(BaseSettings):
     def _validate_for_strict_env(self) -> "Settings":
         """В railway/production падаем, если нет URL баз."""
         if self.is_strict_env:
-            if not self.effective_database_url:
+            if not self.sqlalchemy_url:
                 raise ConfigError(
-                    "DATABASE_URL is required when APP_ENV=railway/production."
+                    "PostgreSQL connection is not configured. "
+                    "Provide DATABASE_URL, POSTGRES_URL, DATABASE_PRIVATE_URL, "
+                    "DATABASE_PUBLIC_URL, или PGHOST+PGPORT+PGUSER+PGPASSWORD+PGDATABASE."
                 )
-            if not self.REDIS_URL:
+            if not self.effective_redis_url:
                 raise ConfigError(
-                    "REDIS_URL is required when APP_ENV=railway/production."
+                    "Redis connection is not configured. "
+                    "Provide REDIS_URL, REDIS_PRIVATE_URL, REDIS_PUBLIC_URL, "
+                    "или REDISHOST+REDISPORT+REDISUSER+REDISPASSWORD."
                 )
-            # Токены — только warning через логгер, не падаем.
             log = logging.getLogger("config")
             if not self.TELEGRAM_BOT_TOKEN:
-                log.warning("TELEGRAM_BOT_TOKEN is empty in strict env — polling will be disabled.")
+                log.warning(
+                    "TELEGRAM_BOT_TOKEN is empty in strict env — polling will be disabled."
+                )
             if not self.OPENROUTER_API_KEY:
-                log.warning("OPENROUTER_API_KEY is empty in strict env — bot will not call LLM.")
+                log.warning(
+                    "OPENROUTER_API_KEY is empty in strict env — bot will not call LLM."
+                )
         return self
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Возвращает кешированный экземпляр Settings."""
-    # pydantic-settings сам читает .env. На некоторых платформах удобно
-    # переопределить файл через ENV_FILE — поддержим это, не ломая поведения.
     env_file = os.getenv("ENV_FILE")
     if env_file:
         return Settings(_env_file=env_file)  # type: ignore[call-arg]
@@ -171,3 +358,14 @@ def reload_settings() -> Settings:
     """Сбрасывает кеш и возвращает свежие настройки. Использовать только в тестах."""
     get_settings.cache_clear()
     return get_settings()
+
+
+__all__ = [
+    "Settings",
+    "ConfigError",
+    "get_settings",
+    "reload_settings",
+    "mask_url_password",
+    "normalize_to_asyncpg",
+    "normalize_to_native",
+]
