@@ -28,6 +28,7 @@ from aiogram.types import (
 )
 
 from app.bot.filters.admin import AdminFilter
+from app.config import get_settings
 from app.core.settings_store import get_settings_store
 from app.llm.openrouter_models import (
     ModelInfo,
@@ -51,6 +52,20 @@ def _looks_like_settings_command(text: str | None) -> bool:
     if not cmd.startswith("/settings"):
         return False
     return cmd == "/settings" or cmd.startswith("/settings@")
+
+
+def _is_admin_message(message: Message) -> bool:
+    if message.from_user is None:
+        return False
+    return message.from_user.id in get_settings().admin_telegram_user_ids
+
+
+async def _answer_settings_access_denied(message: Message) -> None:
+    await message.answer(
+        "Команда /settings доступна только администраторам.\n"
+        "Проверьте, что ваш Telegram user id добавлен в "
+        "<code>ADMIN_TELEGRAM_USER_IDS</code>."
+    )
 
 
 class SettingsStates(StatesGroup):
@@ -313,16 +328,13 @@ async def _render_yandex_menu(message: Message) -> None:
     await message.edit_text("\n\n".join(body), reply_markup=_yandex_keyboard())
 
 
-@settings_router.message(Command("settings"), AdminFilter())
-async def cmd_settings(message: Message, state: FSMContext) -> None:
+@settings_router.message(F.text.func(_looks_like_settings_command))
+async def cmd_settings_entrypoint(message: Message, state: FSMContext) -> None:
+    """Единый entrypoint для /settings из команды, menu button или reply-кнопки."""
     await state.clear()
-    await _render_root_message(message)
-
-
-@settings_router.message(F.text.func(_looks_like_settings_command), AdminFilter())
-async def cmd_settings_text_button(message: Message, state: FSMContext) -> None:
-    """Fallback для кнопок меню, которые присылают /settings обычным текстом."""
-    await state.clear()
+    if not _is_admin_message(message):
+        await _answer_settings_access_denied(message)
+        return
     await _render_root_message(message)
 
 
