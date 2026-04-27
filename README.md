@@ -164,12 +164,31 @@ curl https://<your-app>.up.railway.app/diagnostics
 
 ## Streaming в Telegram
 
-- В private-чате: первый чанк — `sendMessageDraft` (с March 2026 это публичный метод Bot API для всех ботов), затем `editMessageText` с throttle 400–700 мс. Финальный текст — `sendMessage` или последний `editMessageText`.
-- При `TelegramAPIError` на draft — fallback: обычный `sendMessage` + последующие `editMessageText`.
-- В group/supergroup — сразу fallback, никаких draft-ов.
-- `sendChatAction` не чаще раза в 4 секунды.
-- Длинный финальный текст бьётся по 3900 символов через `app/utils/text_splitter.py`.
+- OpenRouter вызывается через `POST /chat/completions` с `stream=true`.
+  Клиент читает SSE/event-stream, извлекает `choices[].delta.content`,
+  игнорирует пустые служебные chunks и завершает чтение на `[DONE]`.
+- В private-чате renderer сначала пытается обновлять `sendMessageDraft`
+  с числовым `draft_id`. Если текущая версия aiogram не умеет этот метод,
+  используется низкоуровневый HTTPS-вызов Bot API без логирования токена.
+- Draft/update throttling настраивается через:
+  - `TELEGRAM_DRAFT_UPDATE_INTERVAL_MS=500`
+  - `TELEGRAM_STREAM_MIN_CHARS_DELTA=24`
+  - `TELEGRAM_STREAM_DRAFT_ENABLED=true`
+  - `TELEGRAM_STREAM_EDIT_FALLBACK_ENABLED=true`
+- Если draft недоступен или падает, включается fallback:
+  сначала обычный `sendMessage` с «Генерирую ответ...», затем
+  `editMessageText` с тем же throttle. Ошибка `message is not modified`
+  игнорируется.
+- В group/supergroup draft не используется: только edit fallback и финальный
+  `sendMessage`.
+- Финальный ответ всегда отправляется через `sendMessage`. Текст длиннее
+  лимита режется на части по 3900 символов через `app/utils/text_splitter.py`.
 - Пустой ответ модели → пользователь получает «Не удалось получить ответ от модели.»
+- В лог пишутся безопасные события `streaming_started`,
+  `streaming_chunk_received`, `draft_update_sent`,
+  `draft_update_failed_fallback_enabled`, `edit_fallback_update_sent`,
+  `final_message_sent`, `llm_request_success/error` без токенов, ключей,
+  полного prompt или длинного пользовательского текста.
 
 ## Команды бота
 

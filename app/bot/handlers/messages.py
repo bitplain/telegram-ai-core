@@ -235,8 +235,21 @@ async def process_user_message(
     error_text: str | None = None
     error_text_for_db: str | None = None
     try:
+        log.info(
+            "streaming_started",
+            extra={
+                "telegram_user_id": message.from_user.id,
+                "agent_id": agent.id,
+                "skill_id": skill.id,
+                "model_id": plan.model.id,
+            },
+        )
         async for chunk in orchestrator.run(plan=plan, messages=messages_payload):
             if chunk.content_delta:
+                log.debug(
+                    "streaming_chunk_received",
+                    extra={"delta_chars": len(chunk.content_delta)},
+                )
                 await renderer.push(chunk.content_delta)
             if chunk.finish_reason:
                 break
@@ -269,6 +282,15 @@ async def process_user_message(
                 request_id=request_id,
                 error=error_text_for_db or error_text,
             )
+        log.info(
+            "llm_request_error",
+            extra={
+                "request_id": str(request_id),
+                "agent_id": agent.id,
+                "skill_id": skill.id,
+                "model_id": plan.model.id,
+            },
+        )
         return
 
     # 10) Успех: пишем outbound и помечаем llm_request успешным.
@@ -283,6 +305,15 @@ async def process_user_message(
             message_type=MESSAGE_TYPE_TEXT,
         )
         await llm_repo.mark_success(request_id=request_id)
+    log.info(
+        "llm_request_success",
+        extra={
+            "request_id": str(request_id),
+            "agent_id": agent.id,
+            "skill_id": skill.id,
+            "model_id": plan.model.id,
+        },
+    )
 
 
 @router.message(F.text & ~F.text.startswith("/"))
