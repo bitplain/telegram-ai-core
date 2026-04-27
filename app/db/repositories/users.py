@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,4 +64,29 @@ class UserRepository:
         if changed:
             user.updated_at = now
             await self._session.flush()
+        return user
+
+    async def add_eth_purchase(
+        self,
+        *,
+        telegram_user_id: int,
+        amount: Decimal,
+        price_usd_per_eth: float | None,
+    ) -> User:
+        """Добавляет ETH к балансу и обновляет суммарную себестоимость в USD."""
+        user = await self.get_by_telegram_id(telegram_user_id)
+        if user is None:
+            raise ValueError("user_not_found")
+        now = datetime.now(timezone.utc)
+        if amount <= 0:
+            raise ValueError("amount_invalid")
+        new_bal = user.eth_balance + amount
+        new_basis = user.eth_cost_basis_usd
+        if price_usd_per_eth is not None and price_usd_per_eth > 0:
+            add_cost = float(amount) * float(price_usd_per_eth)
+            new_basis = (new_basis or 0.0) + add_cost
+        user.eth_balance = new_bal
+        user.eth_cost_basis_usd = new_basis
+        user.updated_at = now
+        await self._session.flush()
         return user

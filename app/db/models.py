@@ -9,12 +9,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from decimal import Decimal
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Double,
     ForeignKey,
     Index,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -50,6 +54,17 @@ class User(Base):
     first_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     language_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    eth_balance: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        nullable=False,
+        default=Decimal("0"),
+        server_default="0",
+    )
+    eth_cost_basis_usd: Mapped[float | None] = mapped_column(
+        Double(),
+        nullable=True,
+    )  # суммарная себестоимость позиции в USD; средняя = cost_basis / balance
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()

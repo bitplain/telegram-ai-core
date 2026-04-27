@@ -403,6 +403,22 @@ async def cmd_history(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /memory (пока не реализована)
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("memory"))
+async def cmd_memory(message: Message) -> None:
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        "Долговременная память ещё не подключена.\n\n"
+        "План: /memory add текст, /memory list, /memory clear.\n"
+        "Пока контекст — только текущий диалог (см. /history).",
+    )
+
+
+# ---------------------------------------------------------------------------
 # /agents и /agent <id>
 # ---------------------------------------------------------------------------
 
@@ -411,13 +427,19 @@ async def cmd_history(message: Message) -> None:
 async def cmd_agents(message: Message) -> None:
     registry = get_agent_registry()
     agents = registry.list_enabled()
-    lines = ["<b>Доступные агенты:</b>"]
+    lines = [
+        "<b>Агенты</b>",
+        "Кратко — id и роль. Подробности: /agent",
+        "",
+    ]
     for a in agents:
+        short = a.description if len(a.description) <= 120 else a.description[:117] + "…"
         lines.append(
             f"• <code>{escape_html(a.id)}</code> — <b>{escape_html(a.name)}</b>: "
-            f"{escape_html(a.description)}"
+            f"{escape_html(short)}"
         )
-    lines.append("\nВыбрать агента: /agent &lt;id&gt;")
+    lines.append("")
+    lines.append("Включить: <code>/agent crypto</code> или <code>/agent news</code>")
     await send_long_html(message.bot, message.chat.id, "\n".join(lines))
 
 
@@ -443,15 +465,11 @@ def _agent_menu_text(active_mode: str, active_agent_id: str) -> str:
     agents = registry.list_agent_menu_enabled()
     lines = [
         "<b>Режимы агентов</b>",
+        f"Сейчас: <b>{escape_html(active_agent.name)}</b> "
+        f"(mode <code>{escape_html(active_mode)}</code>)",
         "",
-        f"Текущий режим: <code>{escape_html(active_mode)}</code>",
-        f"Активный агент: <b>{escape_html(active_agent.name)}</b>",
+        "Выбери спецагента — дальше все сообщения идут ему. Выход: /exit.",
         "",
-        "Выбери специализированного агента.",
-        "После выбора все следующие сообщения будут обрабатываться этим агентом.",
-        "Для выхода используй /exit.",
-        "",
-        "Доступные специализированные агенты:",
     ]
     for agent in agents:
         lines.append(f"• <code>{escape_html(agent.id)}</code> — {escape_html(agent.name)}")

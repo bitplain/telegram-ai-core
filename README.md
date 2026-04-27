@@ -36,9 +36,9 @@ flowchart LR
 - `app/api/` — HTTP-роутеры FastAPI (`/health`, `/ready`, `/telegram/webhook`).
 - `app/bot/` — aiogram-инфраструктура: bot factory, dispatcher, polling, handlers, renderers.
 - `app/agents/`, `app/skills/`, `app/models/` — in-memory профили (registry).
-- `app/core/` — `context_builder`, `orchestrator`, `rate_limit`, `idempotency`, `prompts`.
+- `app/core/` — `context_builder`, `orchestrator`, `rate_limit`, `idempotency`, `prompts`, `portfolio/` (котировки ETH через публичный CoinGecko + кеш Redis), `news/` (интерфейс NewsProvider, пока без внешних фидов).
 - `app/llm/` — клиент OpenRouter (httpx + ручной SSE).
-- `app/db/` — SQLAlchemy ORM + репозитории.
+- `app/db/` — SQLAlchemy ORM + репозитории (в т.ч. `users.eth_balance`, `users.eth_cost_basis_usd` для ручного учёта ETH).
 - `app/redis/` — async Redis client.
 - `app/utils/` — текстовые утилиты, в т.ч. сплиттер для Telegram (3900 символов).
 
@@ -300,6 +300,10 @@ active_model_id=default_balanced
 - `/skills`, `/skill <id>` — список и переключение skill.
 - `/models`, `/model <id>` — список и переключение модели (только если она в `allowed_model_ids` активного агента).
 - Алиасы skill-ов: `/chat`, `/fast`, `/crypto`, `/finance`, `/news`, `/devops`, `/infra`.
+- `/portfolio` — баланс ETH, средняя цена закупки (если указана), текущая цена USD, оценка стоимости, нереализованный PnL % и в USD. **Не инвестиционная рекомендация** (см. ограничения ниже).
+- `/portfolio_add_eth <кол-во> [цена_USD/ETH]` — вручную учесть покупку (суммарный баланс и средняя по цене вводов).
+- `/crypto_digest` — цена ETH (CoinGecko), 24h при доступности, кратко по портфелю; блок «новости» честно показывает, подключены ли внешние источники; пункты «на заметку» — **не** сгенерированные заголовки СМИ, а общие риск-напоминания.
+- `/memory` — зарезервировано под будущую long-term memory (сейчас краткая заглушка).
 - `/settings` — admin-only inline-меню (см. ниже).
 
 ## Access control
@@ -450,6 +454,14 @@ AGENT_PROMPT_MAX_LENGTH=8000
 - Нет managed bots в смысле Bot API 9.5 mini-app-flow — только обычный полноценный бот.
 - Webhook-маршрут есть, но MVP-проверки идут через polling.
 - Skills/Agents/Models — in-memory; миграция в БД — следующий этап.
+
+### Крипто, портфель и новости (Stage 3)
+
+- **Нет автотрейдинга** — бот не исполняет сделки и не выставляет ордера.
+- **Нет DeFi-сканов** — нет on-chain аналитики, TVL, позиций в протоколах; только ручной учёт ETH.
+- **Нет финансовых гарантий** — котировки с публичного CoinGecko, с задержкой и кешем (60 с в Redis, если Redis доступен); PnL — ориентир по введённым вами ценам, не налоговая и не брокерская ведомость.
+- **Новости не выдумываются** — агенты не должны сочинять URL и ленты; до подключения реальных RSS/API заголовки не подставляются (см. `app/core/news/`).
+- Портфель **не** является инвестиционной рекомендацией: волатильность высока, вы несёте риск потерь.
 
 ## Что добавить следующим этапом
 
