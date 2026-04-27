@@ -132,3 +132,9 @@ def test_model_override_prefix_constant() -> None:
 
 def test_cache_ttl_constant() -> None:
     assert SettingsStore.CACHE_TTL_SECONDS == 60
+
+
+def test_openrouter_favorite_compat_methods_exist() -> None:
+    store = SettingsStore()
+    assert hasattr(store, "add_openrouter_favorite_model")
+    assert hasattr(store, "remove_openrouter_favorite_model")
