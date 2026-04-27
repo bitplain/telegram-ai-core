@@ -34,6 +34,10 @@
 - В group/supergroup — сразу fallback (никаких драфтов).
 - Длинные сообщения бьём по 3900 символов через `app/utils/text_splitter.py`.
 
+## Cursor Cloud Agents (Docker)
+
+Базовая VM агента не гарантирует `docker` в PATH. Для воспроизводимого стека в репозитории заданы `.cursor/environment.json` и `.cursor/cloud-agent.Dockerfile` (Docker CE + Compose plugin, `fuse-overlayfs`, `iptables-legacy` по https://cursor.com/docs/cloud-agent/setup.md#running-docker): `install` — `pip install -e '.[dev]'`, `start` — подъём dockerd. После смены образа первый прогон агента может быть дольше обычного.
+
 ## После изменений
 
 1. `docker compose up -d --build`

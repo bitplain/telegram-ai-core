@@ -1,0 +1,10 @@
+{
+  "name": "telegram-ai-core-cloud",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "cloud-agent.Dockerfile",
+    "context": "."
+  },
+  "install": "python3 -m pip install --user --upgrade pip setuptools wheel && python3 -m pip install --user -e '.[dev]'",
+  "start": "sudo service docker start || sudo dockerd > /tmp/dockerd-cloud.log 2>&1 & sleep 2; true"
+}
