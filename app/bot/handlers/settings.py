@@ -293,6 +293,13 @@ async def _render_agents_menu(message: Message) -> None:
     await _edit_or_answer(message, "<b>Настройки агентов</b>\n\nВыберите агента:", _agents_keyboard())
 
 
+async def render_agents_settings_callback(callback: CallbackQuery) -> None:
+    """Переход из внешних inline-меню в существующий раздел /settings → Агенты."""
+    if isinstance(callback.message, Message):
+        await _render_agents_menu(callback.message)
+    await callback.answer()
+
+
 async def _render_agent_menu(message: Message, *, telegram_user_id: int, agent_id: str) -> None:
     service = UserAgentSettingsService()
     try:

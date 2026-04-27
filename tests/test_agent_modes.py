@@ -34,6 +34,18 @@ def test_agent_menu_keyboard_does_not_show_general() -> None:
     assert "Новостной агент" in button_text
 
 
+def test_agent_callbacks_are_registered_once() -> None:
+    from app.bot.handlers import commands
+
+    assert commands.cb_agent_settings.__module__ == "app.bot.handlers.commands"
+
+
+def test_settings_callback_bridge_is_importable() -> None:
+    from app.bot.handlers.settings import render_agents_settings_callback
+
+    assert callable(render_agents_settings_callback)
+
+
 def test_crypto_activation_enables_agent_mode() -> None:
     activation = build_agent_mode_activation("crypto")
 
