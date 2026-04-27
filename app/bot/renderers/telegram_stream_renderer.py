@@ -1,4 +1,4 @@
-"""Streaming renderer for Telegram with draft + edit fallback + final send."""
+"""Streaming renderer for Telegram with draft + edit fallback and no duplicates."""
 
 from __future__ import annotations
 
@@ -85,8 +85,23 @@ class TelegramStreamRenderer:
         if not self._buffer:
             return RenderedResult(final_text="", message_ids=list(self._message_ids), used_draft=self._used_draft)
 
-        # Финальный ответ всегда отправляем обычным sendMessage чанками до 3900 символов.
-        await self._send_final_messages(self._buffer)
+        first_chunk = self._buffer[: self._edit_limit]
+        tail = self._buffer[self._edit_limit :]
+
+        if self._current_message_id is None:
+            await self._send_final_messages(self._buffer)
+        else:
+            # Не создаём второй "поток": финализируем уже видимое streaming-сообщение.
+            if self._used_draft:
+                ok = await self._try_send_draft(first_chunk[: self._draft_limit])
+                if not ok and self._edit_fallback_enabled:
+                    await self._edit_current(first_chunk)
+            elif self._using_edit_fallback:
+                await self._edit_current(first_chunk)
+
+            if tail:
+                await self._send_final_messages(tail)
+
         return RenderedResult(
             final_text=self._buffer,
             message_ids=list(self._message_ids),

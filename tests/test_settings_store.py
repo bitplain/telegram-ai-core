@@ -127,6 +127,7 @@ def test_model_override_prefix_constant() -> None:
     assert SettingsStore.MODEL_OVERRIDE_PREFIX == "model_override."
     assert SettingsStore.SETTING_OPENROUTER_API_KEY == "openrouter_api_key"
     assert SettingsStore.SETTING_YANDEX_API_KEY == "yandex_api_key"
+    assert SettingsStore.SETTING_OPENROUTER_FAVORITE_MODELS == "openrouter_favorite_models"
 
 
 def test_cache_ttl_constant() -> None:
