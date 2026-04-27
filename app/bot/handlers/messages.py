@@ -90,15 +90,18 @@ async def process_user_message(
     )
 
 
-async def _run_message_pipeline(
+async def _run_message_pipeline(  # private: only entry is process_user_message
     message: Message,
     text: str,
     *,
     one_shot_agent_id: str | None,
 ) -> None:
-    """Основной LLM-pipeline без повторного sensitive-check (тесты вызывают напрямую)."""
+    """Внутренний LLM-pipeline. Не вызывать с сырым user-текстом: guard только в `process_user_message`."""
     if message.from_user is None or message.chat is None:
         return
+    assert not detect_sensitive_user_text(text).blocked, (
+        "invariant: sensitive input must be rejected in process_user_message"
+    )
 
     # 1) Идемпотентность апдейтов.
     update_id = getattr(message, "_telegram_update_id", None)
