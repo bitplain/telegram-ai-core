@@ -42,6 +42,7 @@ async def send_long_html(
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=chunk,
+                parse_mode="HTML",
                 reply_to_message_id=reply_to_message_id if first else None,
             )
             message_ids.append(sent.message_id)
@@ -64,6 +65,7 @@ async def send_plain(
         sent = await bot.send_message(
             chat_id=chat_id,
             text=text,
+            parse_mode="HTML",
             reply_to_message_id=reply_to_message_id,
         )
         return sent.message_id

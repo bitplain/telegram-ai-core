@@ -7,7 +7,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.core.access_control import AccessControlMiddleware
 from app.bot.handlers.commands import router as commands_router
+from app.bot.handlers.memory import router as memory_router
 from app.bot.handlers.messages import router as messages_router
+from app.bot.handlers.portfolio import router as portfolio_router
 from app.bot.handlers.settings import settings_router
 
 
@@ -25,6 +27,8 @@ def create_dispatcher() -> Dispatcher:
     # до общих message-handler-ов.
     dispatcher.include_router(settings_router)
     dispatcher.include_router(commands_router)
+    dispatcher.include_router(memory_router)
+    dispatcher.include_router(portfolio_router)
     dispatcher.include_router(messages_router)
     return dispatcher
 

@@ -36,7 +36,9 @@ START_MESSAGE = (
     "• /crypto — криптоанализ\n"
     "• /finance — финансы и рынки\n"
     "• /news — новостные сводки\n"
-    "• /devops — DevOps и инфраструктура\n\n"
+    "• /devops — DevOps и инфраструктура\n"
+    "• /portfolio — учёт ETH и PnL (оценка, не совет)\n"
+    "• /crypto_digest — краткий дайджест по ETH\n\n"
     "Полный список команд — /help."
 )
 
@@ -53,6 +55,12 @@ HELP_MESSAGE = (
     "/agent &lt;id&gt; — войти в режим агента\n"
     "/exit — выйти из режима агента\n"
     "/ask &lt;agent&gt; &lt;текст&gt; — одноразово спросить агента\n"
+    "/portfolio — баланс ETH, цена, PnL (оценка)\n"
+    "/portfolio_add_eth &lt;кол-во&gt; [цена USD/ETH] — учёт покупки\n"
+    "/crypto_digest — кратко: цена ETH, портфель, оговорка по новостям\n"
+    "/remember <текст> — глобальная долговременная память\n"
+    "/memory — список; /memory add_agent <текст> — для текущего агента\n"
+    "/forget_memory <id> — удалить запись\n"
     "/skills — список навыков\n"
     "/skill &lt;id&gt; — выбрать навык\n"
     "/models — список моделей\n"

@@ -9,12 +9,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from decimal import Decimal
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Double,
     ForeignKey,
     Index,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -51,6 +55,17 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     language_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
+    eth_balance: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        nullable=False,
+        default=Decimal("0"),
+        server_default="0",
+    )
+    eth_cost_basis_usd: Mapped[float | None] = mapped_column(
+        Double(),
+        nullable=True,
+    )  # суммарная себестоимость позиции в USD; средняя = cost_basis / balance
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
     )
@@ -63,6 +78,9 @@ class User(Base):
     )
 
     conversations: Mapped[list["Conversation"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    memories: Mapped[list["Memory"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -285,6 +303,46 @@ class ProcessedUpdate(Base):
 
 
 # ---------------------------------------------------------------------------
+# memories — долговременная память (не дублирует history сообщений)
+# ---------------------------------------------------------------------------
+
+MEMORY_SCOPE_GLOBAL = "global"
+MEMORY_SCOPE_AGENT = "agent"
+
+
+class Memory(Base):
+    __tablename__ = "memories"
+    __table_args__ = (
+        Index("ix_memories_user_id", "user_id"),
+        Index("ix_memories_user_scope", "user_id", "scope", "agent_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+    user: Mapped[User] = relationship(back_populates="memories")
+
+
+# ---------------------------------------------------------------------------
 # app_settings — runtime-настройки, управляемые через admin /settings
 # ---------------------------------------------------------------------------
 
@@ -375,6 +433,9 @@ __all__ = [
     "ProcessedUpdate",
     "AppSetting",
     "UserAgentSetting",
+    "Memory",
+    "MEMORY_SCOPE_GLOBAL",
+    "MEMORY_SCOPE_AGENT",
     "CONVERSATION_STATUS_ACTIVE",
     "CONVERSATION_STATUS_CLOSED",
     "CONVERSATION_MODE_DEFAULT",

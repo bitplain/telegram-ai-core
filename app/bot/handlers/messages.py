@@ -13,6 +13,10 @@ from app.core.context_builder import ContextBuilder
 from app.core.agent_modes import resolve_runtime_context
 from app.core.idempotency import is_first_seen
 from app.core.orchestrator import Orchestrator
+from app.core.sensitive_message_guard import (
+    BLOCK_MESSAGE,
+    detect_sensitive_user_text,
+)
 from app.core.prompts import (
     EMPTY_LLM_RESPONSE,
     LLM_GENERIC_ERROR,
@@ -23,6 +27,7 @@ from app.core.rate_limit import RateLimiter
 from app.core.usage_limits import UsageLimiter
 from app.core.services.user_agent_settings import UserAgentSettingsService
 from app.core.settings_store import get_settings_store
+from app.core.memory_context import format_memory_system_suffix
 from app.db.models import (
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
@@ -32,6 +37,7 @@ from app.db.repositories.chats import ChatRepository
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.llm_requests import LLMRequestRepository
 from app.db.repositories.messages import MessageRepository
+from app.db.repositories.memories import MemoryRepository
 from app.db.repositories.users import UserRepository
 from app.db.session import session_scope
 from app.llm.openrouter_client import (
@@ -63,6 +69,39 @@ async def process_user_message(
     text = text.strip()
     if not text:
         return
+
+    # 0) Секреты: до ЛЮБОЙ БД, включая processed_updates (идемпотентность).
+    sens = detect_sensitive_user_text(text)
+    if sens.blocked:
+        log.info(
+            "sensitive_user_message_blocked",
+            extra={
+                "reason": sens.reason,
+                "telegram_user_id": message.from_user.id,
+            },
+        )
+        await send_plain(message.bot, message.chat.id, BLOCK_MESSAGE)
+        return
+
+    await _run_message_pipeline(
+        message,
+        text,
+        one_shot_agent_id=one_shot_agent_id,
+    )
+
+
+async def _run_message_pipeline(  # private: only entry is process_user_message
+    message: Message,
+    text: str,
+    *,
+    one_shot_agent_id: str | None,
+) -> None:
+    """Внутренний LLM-pipeline. Не вызывать с сырым user-текстом: guard только в `process_user_message`."""
+    if message.from_user is None or message.chat is None:
+        return
+    assert not detect_sensitive_user_text(text).blocked, (
+        "invariant: sensitive input must be rejected in process_user_message"
+    )
 
     # 1) Идемпотентность апдейтов.
     update_id = getattr(message, "_telegram_update_id", None)
@@ -224,16 +263,22 @@ async def process_user_message(
 
     async with session_scope() as session:
         cb = ContextBuilder(session)
+        mem_repo = MemoryRepository(session)
         conv_repo = ConversationRepository(session)
         conversation = await conv_repo.get_or_create_active(
             user_id=user_id, chat_id=chat_id
         )
         await cb.resolve_agent(conversation)
+        mems = await mem_repo.list_for_llm_context(
+            user_id=user_id, active_agent_id=agent.id
+        )
+        mem_suffix = format_memory_system_suffix(mems)
         messages_payload = await cb.build_messages(
             conversation=conversation,
             agent=agent,
             history_agent_id=agent.id,
             system_prompt_override=effective_agent_settings.effective_prompt,
+            memory_system_append=mem_suffix if mem_suffix else None,
         )
 
     # 7) Стартуем LLM-стрим и рендерим в Telegram.
