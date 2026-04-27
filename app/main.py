@@ -30,6 +30,17 @@ from app.redis.client import close_redis, init_redis
 log = logging.getLogger(__name__)
 
 
+def _webhook_full_url() -> str | None:
+    settings = get_settings()
+    base = (settings.PUBLIC_API_URL or "").strip().rstrip("/")
+    if not base:
+        return None
+    path = (settings.TELEGRAM_WEBHOOK_PATH or "/telegram/webhook").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{base}{path}"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -64,6 +75,31 @@ async def lifespan(app: FastAPI):
                 log.info("Telegram polling task started")
             else:
                 log.info("Telegram mode=webhook — polling not started")
+                wh_url = _webhook_full_url()
+                secret = (settings.TELEGRAM_WEBHOOK_SECRET or "").strip()
+                if wh_url and secret:
+                    try:
+                        ok = await bot.set_webhook(
+                            url=wh_url,
+                            secret_token=secret,
+                        )
+                        if ok:
+                            log.info(
+                                "telegram_webhook_set_ok",
+                                extra={"webhook_url_prefix": wh_url[:48]},
+                            )
+                        else:
+                            log.error("telegram_webhook_set_failed", extra={"reason": "set_webhook returned false"})
+                    except Exception:  # noqa: BLE001
+                        log.exception("telegram_webhook_set_failed")
+                else:
+                    log.error(
+                        "telegram_webhook_not_configured",
+                        extra={
+                            "has_public_api_url": bool((settings.PUBLIC_API_URL or "").strip()),
+                            "has_webhook_secret": bool(secret),
+                        },
+                    )
         else:
             log.warning("Failed to create bot instance")
     else:
@@ -83,6 +119,11 @@ async def lifespan(app: FastAPI):
 
         if bot is not None:
             try:
+                if get_settings().TELEGRAM_MODE == "webhook":
+                    try:
+                        await bot.delete_webhook(drop_pending_updates=False)
+                    except Exception:  # noqa: BLE001
+                        log.debug("delete_webhook on shutdown failed", exc_info=True)
                 await bot.session.close()
             except Exception:  # noqa: BLE001
                 log.warning("Error while closing bot session in lifespan")

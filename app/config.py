@@ -113,6 +113,8 @@ class Settings(BaseSettings):
     TELEGRAM_WEBHOOK_URL: str = ""
     TELEGRAM_WEBHOOK_PATH: str = "/telegram/webhook"
     TELEGRAM_WEBHOOK_SECRET: str = ""
+    # Public HTTPS base for webhook registration (no trailing path). Example: https://api.example.com
+    PUBLIC_API_URL: str = ""
 
     # --- OpenRouter ---
     OPENROUTER_API_KEY: str = ""

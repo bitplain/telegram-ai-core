@@ -22,7 +22,7 @@ from app.core.prompts import (
 from app.core.rate_limit import RateLimiter
 from app.core.usage_limits import UsageLimiter
 from app.core.services.user_agent_settings import UserAgentSettingsService
-from app.core.settings_store import get_settings_store
+from app.config import get_settings
 from app.db.models import (
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
@@ -179,7 +179,7 @@ async def process_user_message(
     # 5) Если OpenRouter не настроен — отвечаем заглушкой.
     # Учитываем как ENV, так и БД-override (admin /settings).
     or_client = get_openrouter_client()
-    effective_api_key = await get_settings_store().get_openrouter_api_key()
+    effective_api_key = (get_settings().OPENROUTER_API_KEY or "").strip()
     if not effective_api_key:
         await send_plain(message.bot, message.chat.id, OPENROUTER_NOT_CONFIGURED)
         return
@@ -234,6 +234,7 @@ async def process_user_message(
             agent=agent,
             history_agent_id=agent.id,
             system_prompt_override=effective_agent_settings.effective_prompt,
+            user_id=user_id,
         )
 
     # 7) Стартуем LLM-стрим и рендерим в Telegram.

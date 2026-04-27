@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -37,12 +39,20 @@ from app.db.models import (
 from app.db.repositories.chats import ChatRepository
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.llm_requests import LLMRequestRepository
+from app.db.repositories.memories import MemoryRepository
 from app.db.repositories.messages import MessageRepository
+from app.db.repositories.portfolio_assets import PortfolioAssetRepository
+from app.db.repositories.portfolio_wallets import PortfolioWalletRepository
 from app.db.repositories.users import UserRepository
 from app.db.session import session_scope
+from app.db.models import MEMORY_SCOPE_AGENT, MEMORY_SCOPE_GLOBAL
 from app.redis.client import ping as redis_ping
 from app.models.registry import get_model_registry
 from app.skills.registry import get_skill_registry
+from app.utils.secret_material import (
+    SECRET_REJECTION_MESSAGE,
+    looks_like_secret_material,
+)
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +136,350 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await send_plain(message.bot, message.chat.id, HELP_MESSAGE)
+
+
+# ---------------------------------------------------------------------------
+# Memory: /remember, /memory, /forget_memory
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("remember"))
+async def cmd_remember(message: Message, command: CommandObject) -> None:
+    if message.from_user is None:
+        return
+    text = (command.args or "").strip()
+    if not text:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование: /remember ваш текст",
+        )
+        return
+    if looks_like_secret_material(text):
+        await send_plain(message.bot, message.chat.id, SECRET_REJECTION_MESSAGE)
+        return
+    conv = await _ensure_conversation(message)
+    if conv is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            return
+        mem_repo = MemoryRepository(session)
+        row = await mem_repo.create_memory(
+            user_id=user.id,
+            content=text,
+            scope=MEMORY_SCOPE_GLOBAL,
+            agent_id=None,
+        )
+        await session.commit()
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Запомнено (global). ID: <code>{row.id}</code>",
+    )
+
+
+@router.message(Command("remember_agent"))
+async def cmd_remember_agent(message: Message, command: CommandObject) -> None:
+    """Saves a memory visible only to the current agent (same chat routing as conversation)."""
+    if message.from_user is None:
+        return
+    text = (command.args or "").strip()
+    if not text:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование: /remember_agent ваш текст",
+        )
+        return
+    if looks_like_secret_material(text):
+        await send_plain(message.bot, message.chat.id, SECRET_REJECTION_MESSAGE)
+        return
+    conv = await _ensure_conversation(message)
+    if conv is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            return
+        mem_repo = MemoryRepository(session)
+        row = await mem_repo.create_memory(
+            user_id=user.id,
+            content=text,
+            scope=MEMORY_SCOPE_AGENT,
+            agent_id=conv.active_agent_id,
+        )
+        await session.commit()
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Запомнено для агента <code>{escape_html(conv.active_agent_id)}</code>. ID: <code>{row.id}</code>",
+    )
+
+
+@router.message(Command("memory"))
+async def cmd_memory(message: Message) -> None:
+    if message.from_user is None:
+        return
+    conv = await _ensure_conversation(message)
+    if conv is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            return
+        mem_repo = MemoryRepository(session)
+        global_rows, agent_rows = await mem_repo.list_for_user(
+            user_id=user.id,
+            agent_id_for_scope=conv.active_agent_id,
+        )
+    lines = ["<b>Память</b>", "", "<b>Global:</b>"]
+    if not global_rows:
+        lines.append("— пусто")
+    else:
+        for r in global_rows:
+            lines.append(f"• <code>{r.id}</code> {escape_html(r.content[:200])}")
+    lines.extend(["", f"<b>Агент ({escape_html(conv.active_agent_id)}):</b>"])
+    if not agent_rows:
+        lines.append("— пусто")
+    else:
+        for r in agent_rows:
+            lines.append(f"• <code>{r.id}</code> {escape_html(r.content[:200])}")
+    await send_long_html(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("forget_memory"))
+async def cmd_forget_memory(message: Message, command: CommandObject) -> None:
+    if message.from_user is None:
+        return
+    arg = (command.args or "").strip()
+    conv = await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Сначала /start.")
+            return
+        mem_repo = MemoryRepository(session)
+        if not arg:
+            agent_id = conv.active_agent_id if conv else None
+            global_rows, agent_rows = await mem_repo.list_for_user(
+                user_id=user.id,
+                agent_id_for_scope=agent_id,
+            )
+            lines = [
+                "Укажи ID: <code>/forget_memory &lt;uuid&gt;</code>",
+                "",
+                "Доступные ID:",
+            ]
+            for r in global_rows:
+                lines.append(f"global <code>{r.id}</code>")
+            for r in agent_rows:
+                lines.append(f"agent <code>{r.id}</code>")
+            await send_long_html(message.bot, message.chat.id, "\n".join(lines))
+            return
+        try:
+            mid = uuid.UUID(arg)
+        except ValueError:
+            await send_plain(message.bot, message.chat.id, "Некорректный UUID.")
+            return
+        deleted = await mem_repo.delete_by_id(memory_id=mid, user_id=user.id)
+        await session.commit()
+    if deleted:
+        await send_plain(message.bot, message.chat.id, "Запись удалена.")
+    else:
+        await send_plain(message.bot, message.chat.id, "Запись не найдена.")
+
+
+# ---------------------------------------------------------------------------
+# Portfolio (ETH MVP)
+# ---------------------------------------------------------------------------
+
+
+def _parse_decimal(s: str) -> Decimal | None:
+    try:
+        return Decimal(s.replace(",", "."))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+@router.message(Command("portfolio"))
+async def cmd_portfolio(message: Message) -> None:
+    if message.from_user is None:
+        return
+    conv = await _ensure_conversation(message)
+    if conv is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            return
+        port_repo = PortfolioAssetRepository(session)
+        wallet_repo = PortfolioWalletRepository(session)
+        rows = await port_repo.list_by_user(user_id=user.id)
+        wallets = await wallet_repo.list_by_user(user_id=user.id)
+    if not rows and not wallets:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Портфель пуст. Добавь ETH: /portfolio_add_eth или кошелёк: /portfolio_wallet_add",
+        )
+        return
+    lines = ["<b>Портфель</b>", ""]
+    total_eth = Decimal("0")
+    value_eth = Decimal("0")
+    for r in rows:
+        amt = Decimal(str(r.amount))
+        avg = Decimal(str(r.average_buy_price))
+        sym = (r.symbol or "").upper()
+        lines.append(
+            f"• {escape_html(sym)} @ {escape_html(r.network)}: "
+            f"{amt} × avg {avg}"
+        )
+        if sym == "ETH":
+            total_eth += amt
+            value_eth += amt * avg
+    if total_eth > 0:
+        w_avg = value_eth / total_eth
+        lines.extend(["", f"<b>Всего ETH:</b> {total_eth}", f"<b>Средняя цена (взвеш.):</b> {w_avg}"])
+    if wallets:
+        lines.extend(["", "<b>Watch-only кошельки:</b>"])
+        for w in wallets:
+            lines.append(
+                f"• {escape_html(w.name)} @ {escape_html(w.network)}: "
+                f"<code>{escape_html(w.address[:42])}</code>"
+            )
+    await send_long_html(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("portfolio_add_eth"))
+async def cmd_portfolio_add_eth(message: Message, command: CommandObject) -> None:
+    if message.from_user is None:
+        return
+    raw_line = (message.text or "").strip()
+    if looks_like_secret_material(raw_line):
+        await send_plain(message.bot, message.chat.id, SECRET_REJECTION_MESSAGE)
+        return
+    parts = (command.args or "").strip().split()
+    if len(parts) != 3:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Формат: /portfolio_add_eth amount price network\n"
+            "Пример: /portfolio_add_eth 0.25 3200 arbitrum",
+        )
+        return
+    amount_s, price_s, network = parts[0], parts[1], parts[2].strip()
+    amount = _parse_decimal(amount_s)
+    price = _parse_decimal(price_s)
+    if amount is None or price is None or amount <= 0 or price < 0:
+        await send_plain(message.bot, message.chat.id, "Некорректные amount или price.")
+        return
+    if not network:
+        await send_plain(message.bot, message.chat.id, "Укажи network.")
+        return
+    conv = await _ensure_conversation(message)
+    if conv is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        port_repo = PortfolioAssetRepository(session)
+        row = await port_repo.upsert_eth_add(
+            user_id=user.id,
+            network=network.lower(),
+            add_amount=amount,
+            add_price=price,
+        )
+        await session.commit()
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"ETH @ {escape_html(network)}: количество {row.amount}, средняя цена {row.average_buy_price}",
+    )
+
+
+@router.message(Command("portfolio_wallet_add"))
+async def cmd_portfolio_wallet_add(message: Message, command: CommandObject) -> None:
+    if message.from_user is None:
+        return
+    raw_line = (message.text or "").strip()
+    if looks_like_secret_material(raw_line):
+        await send_plain(message.bot, message.chat.id, SECRET_REJECTION_MESSAGE)
+        return
+    parts = (command.args or "").strip().split(maxsplit=2)
+    if len(parts) != 3:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Формат: /portfolio_wallet_add name network address\n"
+            "Пример: /portfolio_wallet_add cold1 arbitrum 0xabc...",
+        )
+        return
+    name, network, address = parts[0], parts[1], parts[2].strip()
+    if not address or not network:
+        await send_plain(message.bot, message.chat.id, "Укажи name, network и address.")
+        return
+    conv = await _ensure_conversation(message)
+    if conv is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        w_repo = PortfolioWalletRepository(session)
+        row = await w_repo.upsert_watch_only(
+            user_id=user.id,
+            name=name,
+            network=network.lower(),
+            address=address,
+        )
+        await session.commit()
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Кошелёк сохранён (watch-only): {escape_html(row.name)} @ {escape_html(row.network)}",
+    )
+
+
+@router.message(Command("portfolio_wallets"))
+async def cmd_portfolio_wallets(message: Message) -> None:
+    if message.from_user is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Сначала /start.")
+            return
+        w_repo = PortfolioWalletRepository(session)
+        wallets = await w_repo.list_by_user(user_id=user.id)
+    if not wallets:
+        await send_plain(message.bot, message.chat.id, "Кошельков нет. /portfolio_wallet_add")
+        return
+    lines = ["<b>Watch-only кошельки</b>", ""]
+    for w in wallets:
+        lines.append(
+            f"• <b>{escape_html(w.name)}</b> {escape_html(w.network)}: "
+            f"<code>{escape_html(w.address)}</code>"
+        )
+    await send_long_html(message.bot, message.chat.id, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -279,15 +633,8 @@ async def cmd_status(message: Message) -> None:
     if message.from_user is not None:
         admin_ids = get_settings().admin_telegram_user_ids
         if message.from_user.id in admin_ids:
-            store = get_settings_store()
-            api_key = await store.get_openrouter_api_key()
-            has_db_key = await store.has_db_openrouter_api_key()
-            if api_key and has_db_key:
-                source = "db"
-            elif api_key:
-                source = "env"
-            else:
-                source = "не задан"
+            api_key = (get_settings().OPENROUTER_API_KEY or "").strip()
+            source = "env" if api_key else "не задан"
             lines.append(f"OpenRouter API key: <b>{escape_html(source)}</b>")
             override = await store.get_model_override(model.id)
             if override:

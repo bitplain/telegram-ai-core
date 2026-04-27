@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -15,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -293,8 +295,6 @@ class AppSetting(Base):
     """Runtime-настройки приложения (key/value) с опциональным шифрованием.
 
     Используемые ключи:
-    - ``openrouter_api_key`` — переопределение ENV-ключа OpenRouter (encrypted,
-      если задан SETTINGS_ENCRYPTION_KEY).
     - ``yandex_api_key`` — API-ключ Яндекс-провайдера (пока используется как
       сохраняемая заглушка для будущей интеграции).
     - ``model_override.<model_id>`` — переопределение OpenRouter slug-а для
@@ -323,6 +323,99 @@ class AppSetting(Base):
 # ---------------------------------------------------------------------------
 # user_agent_settings — пользовательские override-ы prompt/model для агентов
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# memories — user-scoped notes for LLM context (global or per-agent)
+# ---------------------------------------------------------------------------
+
+MEMORY_SCOPE_GLOBAL = "global"
+MEMORY_SCOPE_AGENT = "agent"
+
+
+class Memory(Base):
+    __tablename__ = "memories"
+    __table_args__ = (Index("ix_memories_user_scope", "user_id", "scope"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+
+
+# ---------------------------------------------------------------------------
+# portfolio_assets — ETH MVP (manual positions)
+# ---------------------------------------------------------------------------
+
+
+class PortfolioWallet(Base):
+    """Watch-only wallet label (no keys)."""
+
+    __tablename__ = "portfolio_wallets"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "network",
+            "address",
+            name="uq_portfolio_wallets_user_network_address",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    address: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+
+
+class PortfolioAsset(Base):
+    __tablename__ = "portfolio_assets"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "symbol",
+            "network",
+            name="uq_portfolio_assets_user_symbol_network",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    average_buy_price: Mapped[Decimal] = mapped_column(Numeric(38, 8), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
 
 
 class UserAgentSetting(Base):
@@ -368,6 +461,11 @@ class UserAgentSetting(Base):
 __all__ = [
     "Base",
     "User",
+    "Memory",
+    "PortfolioAsset",
+    "PortfolioWallet",
+    "MEMORY_SCOPE_GLOBAL",
+    "MEMORY_SCOPE_AGENT",
     "Chat",
     "Conversation",
     "Message",

@@ -66,18 +66,12 @@ class OpenRouterClient:
 
     @property
     def is_configured(self) -> bool:
-        """True, если ключ задан в ENV. Не учитывает БД-override."""
+        """True, если OPENROUTER_API_KEY задан в ENV."""
         return bool(self._api_key)
 
     async def is_configured_async(self) -> bool:
-        """True, если ключ есть либо в ENV, либо в БД (через settings_store)."""
-        if self._api_key:
-            return True
-        # Локальный импорт, чтобы избежать циклической зависимости.
-        from app.core.settings_store import get_settings_store
-
-        store = get_settings_store()
-        return bool(await store.get_openrouter_api_key())
+        """Совместимость: ключ только из ENV (как ``is_configured``)."""
+        return bool(self._api_key)
 
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
