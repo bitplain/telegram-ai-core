@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import uuid
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,3 +66,37 @@ class UserRepository:
             user.updated_at = now
             await self._session.flush()
         return user
+
+    async def add_eth_balance(self, *, telegram_user_id: int, amount: float) -> User | None:
+        user = await self.get_by_telegram_id(telegram_user_id)
+        if user is None:
+            return None
+        new_bal = float(user.eth_balance or 0) + float(amount)
+        user.eth_balance = new_bal  # type: ignore[assignment]
+        user.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+        return user
+
+    async def set_digest_enabled(
+        self, *, telegram_user_id: int, enabled: bool
+    ) -> User | None:
+        user = await self.get_by_telegram_id(telegram_user_id)
+        if user is None:
+            return None
+        user.digest_enabled = enabled
+        user.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+        return user
+
+    async def update_last_digest_sent(self, *, user_id: uuid.UUID) -> None:
+        user = await self._session.get(User, user_id)
+        if user is None:
+            return
+        user.last_digest_sent_at = datetime.now(timezone.utc)
+        user.updated_at = user.last_digest_sent_at
+        await self._session.flush()
+
+    async def list_digest_enabled(self) -> list[User]:
+        stmt = select(User).where(User.digest_enabled.is_(True))
+        res = await self._session.execute(stmt)
+        return list(res.scalars().all())

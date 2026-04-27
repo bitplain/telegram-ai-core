@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import logging
+import re
+from html import unescape
 
 from aiogram import F, Router
 from aiogram.types import Message
 
 from app.bot.renderers.telegram_stream_renderer import TelegramStreamRenderer
-from app.bot.renderers.telegram_text import send_plain
+from app.bot.handlers.portfolio_helpers import build_portfolio_message_html
+from app.bot.renderers.telegram_text import main_menu_inline_keyboard, send_plain
 from app.core.context_builder import ContextBuilder
-from app.core.agent_modes import resolve_runtime_context
+from app.core.agent_modes import AGENT_MODE_DEFAULT, resolve_runtime_context
+from app.core.quick_intent import QuickIntent, detect_quick_intent
+from app.core.services.crypto_context import build_crypto_analyst_context_block
 from app.core.idempotency import is_first_seen
 from app.core.orchestrator import Orchestrator
 from app.core.prompts import (
@@ -141,6 +146,25 @@ async def process_user_message(
             message_text=text,
             one_shot_agent_id=one_shot_agent_id,
         )
+        if (
+            one_shot_agent_id is None
+            and conversation.active_mode == AGENT_MODE_DEFAULT
+        ):
+            qi = detect_quick_intent(text)
+            if qi is QuickIntent.PORTFOLIO:
+                runtime_context = resolve_runtime_context(
+                    conversation=conversation,
+                    message_text=text,
+                    one_shot_agent_id=None,
+                    force_skill_id="portfolio",
+                )
+            elif qi is QuickIntent.CRYPTO_MARKET:
+                runtime_context = resolve_runtime_context(
+                    conversation=conversation,
+                    message_text=text,
+                    one_shot_agent_id=None,
+                    force_skill_id="crypto",
+                )
         if runtime_context.conversation_patch:
             await conv_repo.update_active_routing(
                 conversation_id=conversation_id,
@@ -175,6 +199,36 @@ async def process_user_message(
                 ),
             )
             return
+
+    if skill.id == "portfolio":
+        async with session_scope() as session:
+            msg_repo = MessageRepository(session)
+            await msg_repo.add(
+                conversation_id=conversation_id,
+                direction=MESSAGE_DIRECTION_INBOUND,
+                text=user_text,
+                telegram_message_id=message.message_id,
+                message_type=MESSAGE_TYPE_TEXT,
+                agent_id=agent.id,
+                skill_id=skill.id,
+                model_id=runtime_context.model_id,
+            )
+            body = await build_portfolio_message_html(
+                session, telegram_user_id=message.from_user.id
+            )
+            plain = " ".join(unescape(re.sub(r"<[^>]+>", " ", body)).split())
+            await msg_repo.add(
+                conversation_id=conversation_id,
+                direction=MESSAGE_DIRECTION_OUTBOUND,
+                text=plain,
+                telegram_message_id=None,
+                message_type=MESSAGE_TYPE_TEXT,
+                agent_id=agent.id,
+                skill_id=skill.id,
+                model_id=runtime_context.model_id,
+            )
+        await message.answer(body, reply_markup=main_menu_inline_keyboard())
+        return
 
     # 5) Если OpenRouter не настроен — отвечаем заглушкой.
     # Учитываем как ENV, так и БД-override (admin /settings).
@@ -229,11 +283,24 @@ async def process_user_message(
             user_id=user_id, chat_id=chat_id
         )
         await cb.resolve_agent(conversation)
+        system_override = effective_agent_settings.effective_prompt
+        if agent.id == "crypto":
+            try:
+                block = await build_crypto_analyst_context_block(
+                    session,
+                    telegram_user_id=message.from_user.id,
+                )
+                system_override = (
+                    f"{system_override}\n\n--- Контекст (данные бота и внешние API) ---\n{block}"
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("crypto_context_block_failed")
+
         messages_payload = await cb.build_messages(
             conversation=conversation,
             agent=agent,
             history_agent_id=agent.id,
-            system_prompt_override=effective_agent_settings.effective_prompt,
+            system_prompt_override=system_override,
         )
 
     # 7) Стартуем LLM-стрим и рендерим в Telegram.

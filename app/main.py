@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from app.api.diagnostics import router as diagnostics_router
 from app.api.health import router as health_router
 from app.api.telegram_webhook import router as telegram_webhook_router
+from app.bot.background_workers import start_background_workers
 from app.bot.bot_factory import create_bot
 from app.bot.dispatcher import create_dispatcher
 from app.bot.polling import start_polling
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
     bot = None
     dispatcher = None
     polling_task: asyncio.Task | None = None
+    worker_tasks: list[asyncio.Task] = []
 
     if settings.TELEGRAM_BOT_TOKEN:
         bot = create_bot(settings.TELEGRAM_BOT_TOKEN)
@@ -56,6 +58,9 @@ async def lifespan(app: FastAPI):
             dispatcher = create_dispatcher()
             app.state.bot = bot
             app.state.dispatcher = dispatcher
+            w1, w2 = start_background_workers(bot)
+            worker_tasks.extend([w1, w2])
+            log.info("Background workers started (alerts + digest)")
 
             if settings.TELEGRAM_MODE == "polling":
                 polling_task = asyncio.create_task(
@@ -79,6 +84,13 @@ async def lifespan(app: FastAPI):
                 await polling_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 # CancelledError ожидаем; прочие ошибки уже залогированы в polling.
+                pass
+
+        for wt in worker_tasks:
+            wt.cancel()
+            try:
+                await wt
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
 
         if bot is not None:

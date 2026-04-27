@@ -11,7 +11,13 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.agents.registry import get_agent_registry
-from app.bot.renderers.telegram_text import escape_html, send_long_html, send_plain
+from app.bot.handlers.portfolio_helpers import build_portfolio_message_html
+from app.bot.renderers.telegram_text import (
+    escape_html,
+    main_menu_inline_keyboard,
+    send_long_html,
+    send_plain,
+)
 from app.api.health import ready
 from app.config import get_settings
 from app.core.agent_modes import (
@@ -34,8 +40,10 @@ from app.db.models import (
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
 )
+from app.core.price.eth import fetch_eth_usd_price
 from app.db.repositories.chats import ChatRepository
 from app.db.repositories.conversations import ConversationRepository
+from app.db.repositories.eth_alerts import EthPriceAlertRepository
 from app.db.repositories.llm_requests import LLMRequestRepository
 from app.db.repositories.messages import MessageRepository
 from app.db.repositories.users import UserRepository
@@ -43,6 +51,7 @@ from app.db.session import session_scope
 from app.redis.client import ping as redis_ping
 from app.models.registry import get_model_registry
 from app.skills.registry import get_skill_registry
+from app.utils.formatting import format_decimal
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +63,7 @@ SKILL_COMMAND_ALIASES = (
     "chat",
     "fast",
     "crypto",
+    "portfolio",
     "finance",
     "news",
     "devops",
@@ -120,12 +130,167 @@ def _activation_for_new_target(target: str, active) -> object:  # noqa: ANN001
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     await _ensure_conversation(message)
-    await send_plain(message.bot, message.chat.id, START_MESSAGE)
+    await message.answer(START_MESSAGE, reply_markup=main_menu_inline_keyboard())
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await send_plain(message.bot, message.chat.id, HELP_MESSAGE)
+    await message.answer(HELP_MESSAGE, reply_markup=main_menu_inline_keyboard())
+
+
+# ---------------------------------------------------------------------------
+# Portfolio / ETH / alerts / digest
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("portfolio"))
+async def cmd_portfolio(message: Message) -> None:
+    if message.from_user is None:
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        text = await build_portfolio_message_html(
+            session, telegram_user_id=message.from_user.id
+        )
+    await message.answer(text, reply_markup=main_menu_inline_keyboard())
+
+
+@router.message(Command("add_eth"))
+async def cmd_add_eth(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    raw = (command.args or "").strip().replace(",", ".")
+    try:
+        amount = float(raw)
+    except ValueError:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Укажи число: <code>/add_eth 0.25</code>",
+        )
+        return
+    if amount <= 0 or amount > 1_000_000:
+        await send_plain(message.bot, message.chat.id, "Некорректное количество ETH.")
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        user = await user_repo.add_eth_balance(
+            telegram_user_id=message.from_user.id, amount=amount
+        )
+        bal = float(user.eth_balance) if user else 0.0
+
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Добавлено <b>{escape_html(format_decimal(amount))}</b> ETH. "
+        f"Баланс: <b>{escape_html(format_decimal(bal))}</b> ETH.",
+    )
+
+
+@router.message(Command("alert_eth"))
+async def cmd_alert_eth(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    raw = (command.args or "").strip().replace(",", ".")
+    try:
+        target = float(raw)
+    except ValueError:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Пример: <code>/alert_eth 4000</code>",
+        )
+        return
+    if target <= 0:
+        await send_plain(message.bot, message.chat.id, "Цена должна быть положительной.")
+        return
+    price = await fetch_eth_usd_price()
+    if price is None:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Не удалось получить текущую цену ETH. Попробуй позже.",
+        )
+        return
+    if price < target:
+        direction = "above"
+    elif price > target:
+        direction = "below"
+    else:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Текущая цена уже на уровне цели — выбери другое значение.",
+        )
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        alert_repo = EthPriceAlertRepository(session)
+        await alert_repo.create(
+            user_id=user.id,
+            telegram_user_id=message.from_user.id,
+            target_price_usd=target,
+            direction=direction,
+        )
+    dir_ru = "выше" if direction == "above" else "ниже"
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        (
+            f"Алерт создан: уведомлю, когда цена ETH будет <b>{dir_ru}</b> "
+            f"<b>${target:,.2f}</b>.\n"
+            f"Текущая цена (оценка): <b>${price:,.2f}</b>."
+        ),
+    )
+
+
+@router.message(Command("digest_on"))
+async def cmd_digest_on(message: Message) -> None:
+    if message.from_user is None:
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        await user_repo.set_digest_enabled(telegram_user_id=message.from_user.id, enabled=True)
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        "Ежедневный дайджест включён. Отключить: /digest_off",
+    )
+
+
+@router.message(Command("digest_off"))
+async def cmd_digest_off(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        await user_repo.set_digest_enabled(telegram_user_id=message.from_user.id, enabled=False)
+    await send_plain(message.bot, message.chat.id, "Ежедневный дайджест выключен.")
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +864,38 @@ async def cb_agent_close(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "ux:portfolio")
+async def cb_ux_portfolio(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message) or callback.from_user is None:
+        await callback.answer()
+        return
+    async with session_scope() as session:
+        text = await build_portfolio_message_html(
+            session, telegram_user_id=callback.from_user.id
+        )
+    await callback.message.answer(text, reply_markup=main_menu_inline_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ux:add_eth")
+async def cb_ux_add_eth(callback: CallbackQuery) -> None:
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Чтобы добавить ETH на учёт, отправь команду, например:\n<code>/add_eth 0.1</code>",
+            reply_markup=main_menu_inline_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ux:memory")
+async def cb_ux_memory(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    await cmd_history(callback.message)
+    await callback.answer()
+
+
 # ---------------------------------------------------------------------------
 # /skills и /skill <id>
 # ---------------------------------------------------------------------------
@@ -775,7 +972,12 @@ async def cmd_skill(message: Message, command: CommandObject) -> None:
 # дубликат логики, мы тут сразу делаем switch, а пользовательский текст
 # (если есть) шлём в общий стрим как ещё одно сообщение.
 
-@router.message(F.text.startswith("/"), F.text.regexp(r"^/(?:chat|fast|crypto|finance|news|devops|infra)(?:@\w+)?(?:\s|$)"))
+@router.message(
+    F.text.startswith("/"),
+    F.text.regexp(
+        r"^/(?:chat|fast|crypto|portfolio|finance|news|devops|infra)(?:@\w+)?(?:\s|$)"
+    ),
+)
 async def cmd_skill_alias(message: Message) -> None:
     text = message.text or ""
     first_word, _, remainder = text.partition(" ")

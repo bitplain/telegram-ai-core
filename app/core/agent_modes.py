@@ -168,6 +168,7 @@ def resolve_runtime_context(
     explicit_agent_id: str | None = None,
     explicit_skill_id: str | None = None,
     one_shot_agent_id: str | None = None,
+    force_skill_id: str | None = None,
     agent_registry: AgentRegistry | None = None,
     skill_registry: SkillRegistry | None = None,
     model_registry: ModelRegistry | None = None,
@@ -207,6 +208,28 @@ def resolve_runtime_context(
             is_one_shot=True,
             cleaned_text=raw_text,
             matched_by="one_shot_agent",
+            conversation_patch={},
+        )
+
+    if force_skill_id:
+        skill = skills.get_or_none(force_skill_id)
+        if skill is None or not skill.enabled:
+            raise ValueError(force_skill_id)
+        agent = agents.get(skill.agent_id)
+        model_id = _allowed_or_default_model_id(
+            agent=agent,
+            model_id=getattr(conversation, "active_model_id", None),
+            model_registry=models,
+        )
+        return _build_runtime_context(
+            active_mode=active_mode,
+            agent=agent,
+            skill=skill,
+            model_id=model_id,
+            model_registry=models,
+            is_one_shot=False,
+            cleaned_text=raw_text,
+            matched_by="quick_intent",
             conversation_patch={},
         )
 

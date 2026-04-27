@@ -8,10 +8,24 @@ from collections.abc import Iterable
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.utils.text_splitter import split_for_telegram
 
 log = logging.getLogger(__name__)
+
+
+def main_menu_inline_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки быстрого доступа (используются в /start и ответах по портфелю)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Портфель", callback_data="ux:portfolio"),
+                InlineKeyboardButton(text="+ ETH", callback_data="ux:add_eth"),
+            ],
+            [InlineKeyboardButton(text="Память (история)", callback_data="ux:memory")],
+        ]
+    )
 
 
 def escape_html(text: str | None) -> str:
@@ -72,4 +86,4 @@ async def send_plain(
         return None
 
 
-__all__ = ["escape_html", "send_long_html", "send_plain"]
+__all__ = ["escape_html", "main_menu_inline_keyboard", "send_long_html", "send_plain"]
