@@ -79,6 +79,7 @@ class TelegramStreamRenderer:
         self._last_edit_ts: float = 0.0
         self._last_chat_action_ts: float = 0.0
         self._message_ids: list[int] = []
+        self._draft_id = f"{self._chat_id}-{int(time.time() * 1000)}"
 
     @property
     def is_private(self) -> bool:
@@ -212,6 +213,7 @@ class TelegramStreamRenderer:
         reply_parameters = self._build_reply_parameters()
         kwargs: dict[str, object] = {
             "chat_id": self._chat_id,
+            "draft_id": self._draft_id,
             "text": text,
         }
         if reply_parameters is not None:

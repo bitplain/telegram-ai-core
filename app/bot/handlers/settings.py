@@ -44,6 +44,15 @@ _API_KEY_PREFIX = "sk-or-v1-"
 _VALIDATE_URL = "https://openrouter.ai/api/v1/key"
 
 
+def _looks_like_settings_command(text: str | None) -> bool:
+    if not text:
+        return False
+    cmd = text.strip().split(maxsplit=1)[0].lower()
+    if not cmd.startswith("/settings"):
+        return False
+    return cmd == "/settings" or cmd.startswith("/settings@")
+
+
 class SettingsStates(StatesGroup):
     awaiting_openrouter_api_key = State()
     awaiting_yandex_api_key = State()
@@ -306,6 +315,13 @@ async def _render_yandex_menu(message: Message) -> None:
 
 @settings_router.message(Command("settings"), AdminFilter())
 async def cmd_settings(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _render_root_message(message)
+
+
+@settings_router.message(F.text.func(_looks_like_settings_command), AdminFilter())
+async def cmd_settings_text_button(message: Message, state: FSMContext) -> None:
+    """Fallback для кнопок меню, которые присылают /settings обычным текстом."""
     await state.clear()
     await _render_root_message(message)
 
