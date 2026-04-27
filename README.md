@@ -91,6 +91,43 @@ pytest -q
 
 После изменения переменных — нажми **Redeploy** в dashboard, либо `Restart` сервиса.
 
+### Привязка к Postgres/Redis на Railway: 1 команда
+
+Если не хочется править Variables вручную — выполни локально:
+
+```bash
+bash scripts/railway-bind.sh
+```
+
+Скрипт через Railway CLI определит имена сервисов Postgres и Redis в текущем
+проекте и проставит в app-сервис reference-переменные:
+
+```
+DATABASE_URL=${{<Postgres-service>.DATABASE_URL}}
+REDIS_URL=${{<Redis-service>.REDIS_URL}}
+```
+
+После этого нажми **Redeploy**. Подробности — в `VARIABLES.md`.
+
+Резолвер `app/config.py` толерантен к формату переменных: достаточно любого из
+`DATABASE_URL` / `POSTGRES_URL` / `DATABASE_PRIVATE_URL` / `DATABASE_PUBLIC_URL`
+или набора `PGHOST`+`PGPORT`+`PGUSER`+`PGPASSWORD`+`PGDATABASE` для PostgreSQL.
+Аналогично для Redis: `REDIS_URL` / `REDIS_PRIVATE_URL` / `REDIS_PUBLIC_URL`
+или `REDISHOST`+`REDISPORT`+`REDISUSER`+`REDISPASSWORD`.
+
+### Диагностика в проде: `GET /diagnostics`
+
+После деплоя проверь:
+
+```bash
+curl https://<your-app>.up.railway.app/diagnostics
+```
+
+Эндпоинт отдаёт JSON со статусом `postgres`/`redis`, версиями серверов,
+текущим `schema_version` (Alembic head) и `connection_sources` — без секретов
+и без raw-URL. Опционально можно защитить эндпоинт переменной
+`DIAGNOSTICS_TOKEN`: тогда нужно передавать `X-Diagnostics-Token: <token>`.
+
 ## Навыки, агенты, модели
 
 ### Skills

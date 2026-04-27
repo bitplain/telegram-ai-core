@@ -39,7 +39,24 @@
 1. `docker compose up -d --build`
 2. `curl http://localhost:8000/health` — должен быть 200.
 3. `curl http://localhost:8000/ready` — должен быть 200, если PG и Redis подняты.
-4. `docker compose exec -T app pytest -q` — все тесты должны проходить.
+4. `curl http://localhost:8000/diagnostics` — JSON со статусом PG/Redis, источниками подключения и `schema_version` (без секретов).
+5. `docker compose exec -T app pytest -q` — все тесты должны проходить.
+
+## Railway-обвязка
+
+- Конфиг толерантен к набору переменных (`DATABASE_URL` / `POSTGRES_URL` /
+  `DATABASE_PRIVATE_URL` / `DATABASE_PUBLIC_URL` / `PGHOST+...`,
+  и `REDIS_URL` / `REDIS_PRIVATE_URL` / `REDIS_PUBLIC_URL` / `REDISHOST+...`).
+  Подробности — `VARIABLES.md`.
+- Для однократной привязки app-сервиса к Postgres/Redis есть
+  `bash scripts/railway-bind.sh` — он через Railway CLI проставляет нужные
+  reference variables.
+- `GET /diagnostics` — единая точка для проверки прод-конфигурации (статус
+  PG/Redis, версии, `schema_version`, `connection_sources`). Если задан
+  `DIAGNOSTICS_TOKEN` — нужен заголовок `X-Diagnostics-Token`.
+- `scripts/entrypoint.railway.sh` сначала запускает
+  `scripts/railway_diagnose.py`, который печатает безопасную сводку (без
+  паролей) и валит старт с понятной инструкцией, если переменные не заданы.
 
 ## MVP-ограничения, которые мы сознательно держим
 

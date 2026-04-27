@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.diagnostics import router as diagnostics_router
 from app.api.health import router as health_router
 from app.api.telegram_webhook import router as telegram_webhook_router
 from app.bot.bot_factory import create_bot
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
     app.include_router(health_router)
+    app.include_router(diagnostics_router)
     app.include_router(telegram_webhook_router)
     return app
 

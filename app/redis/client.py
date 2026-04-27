@@ -25,7 +25,7 @@ async def init_redis() -> aioredis.Redis | None:
         return _redis
 
     settings = get_settings()
-    url = settings.REDIS_URL
+    url = settings.effective_redis_url
     if not url:
         log.warning("REDIS_URL is empty — Redis features (rate limit, idempotency cache) disabled.")
         return None
@@ -48,6 +48,20 @@ async def init_redis() -> aioredis.Redis | None:
 
     _redis = client
     log.info("Redis client initialized")
+
+    # Автоматически выставляем безопасный maxmemory-policy. На managed Redis
+    # (Railway plugin, Upstash, Render и др.) команда CONFIG SET может быть
+    # запрещена — в этом случае молча проглатываем ошибку.
+    try:
+        await client.config_set("maxmemory-policy", "allkeys-lru")
+        log.info("Redis maxmemory-policy=allkeys-lru applied")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "Could not apply Redis CONFIG SET maxmemory-policy "
+            "(managed plugin may forbid it): %s",
+            exc.__class__.__name__,
+        )
+
     return _redis
 
 
