@@ -1,0 +1,55 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram_ai_core_app
+    env_file:
+      - .env
+    environment:
+      # В compose всегда подменяем хосты на имена сервисов,
+      # независимо от того, что лежит в .env (защита от случайного localhost).
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["bash", "scripts/entrypoint.sh"]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: telegram_ai_core_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-telegram_ai_core}
+      POSTGRES_USER: ${POSTGRES_USER:-telegram_ai_core}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-telegram_ai_core_password}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-telegram_ai_core} -d ${POSTGRES_DB:-telegram_ai_core}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: telegram_ai_core_redis
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:
