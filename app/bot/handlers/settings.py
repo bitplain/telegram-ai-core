@@ -94,6 +94,11 @@ def _format_price(price: float | None) -> str:
     return f"${price * 1_000_000:.2f}/1M"
 
 
+def _model_label(model) -> str:  # noqa: ANN001
+    """Показываем пользователю реальный OpenRouter slug, а не внутренний id."""
+    return str(getattr(model, "model_name", None) or getattr(model, "id", ""))
+
+
 def _preview_text(value: str, *, limit: int = _PROMPT_PREVIEW_CHARS) -> str:
     text = value.strip()
     if len(text) <= limit:
@@ -178,7 +183,7 @@ def _agent_models_keyboard(agent_id: str, service: UserAgentSettingsService | No
     rows = [
         [
             InlineKeyboardButton(
-                text=model.id,
+                text=_model_label(model)[:64],
                 callback_data=SettingsCB(action="agent_set_model", arg1=agent_id, arg2=model.id).pack(),
             )
         ]
@@ -300,7 +305,7 @@ async def _render_agent_menu(message: Message, *, telegram_user_id: int, agent_i
     text = (
         f"<b>Агент: {agent.name}</b>\n"
         f"ID: <code>{agent.id}</code>\n"
-        f"Модель: <code>{settings.effective_model.id}</code> ({model_source})\n"
+        f"Модель: <code>{_model_label(settings.effective_model)}</code> ({model_source})\n"
         f"Описание: {agent.description or 'не задано'}\n"
         f"Prompt: <b>{prompt_line}</b>\n\n"
         f"<code>{prompt_preview}</code>"
@@ -443,7 +448,7 @@ async def cb_agent_set_model(callback: CallbackQuery, callback_data: SettingsCB,
         await callback.answer("Модель не найдена", show_alert=True)
         return
     if isinstance(callback.message, Message):
-        await callback.message.answer(f"Модель для агента <b>{settings.agent.name}</b> сохранена: <code>{settings.effective_model.id}</code>")
+        await callback.message.answer(f"Модель для агента <b>{settings.agent.name}</b> сохранена: <code>{_model_label(settings.effective_model)}</code>")
         await _render_agent_menu(callback.message, telegram_user_id=callback.from_user.id, agent_id=settings.agent.id)
     await callback.answer("Сохранено")
 
