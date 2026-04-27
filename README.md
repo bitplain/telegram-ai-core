@@ -186,7 +186,14 @@ curl https://<your-app>.up.railway.app/diagnostics
 ## Admin `/settings`
 
 Команда `/settings` доступна только пользователям из `ADMIN_TELEGRAM_USER_IDS`
-и позволяет менять «горячие» runtime-настройки без redeploy:
+и открывает главное меню:
+
+- **API** — runtime-настройки провайдеров и OpenRouter model overrides.
+- **Агенты** — пользовательские настройки prompt/model для каждого агента.
+
+### `/settings → API`
+
+В разделе API сохранена прежняя логика:
 
 - **OpenRouter API key** — приоритет: значение из БД (`app_settings`) →
   `OPENROUTER_API_KEY` из ENV. После сохранения через бота все следующие LLM-
@@ -194,13 +201,46 @@ curl https://<your-app>.up.railway.app/diagnostics
   - Перед сохранением ключ валидируется через `GET https://openrouter.ai/api/v1/key`.
   - Сообщение пользователя с ключом удаляется из чата сразу.
   - Если задан `SETTINGS_ENCRYPTION_KEY` — ключ шифруется Fernet-ом.
+- **Яндекс** — пока сохраняемая заглушка: ключ можно ввести и хранить в БД,
+  runtime-интеграция провайдера ещё не подключена.
 - **Model override** — для любого `ModelProfile` (`default_balanced`,
   `crypto_model` и т.д.) можно подменить OpenRouter slug на любую модель
   из `GET /api/v1/models`. Override применяется в `Orchestrator.plan_async`.
 - **Сброс overrides** удаляет все `model_override.*` из `app_settings`,
-  ENV-ключ остаётся без изменений.
+  API-ключи остаются без изменений.
 - **Обновить список моделей** — принудительно перетянуть `/api/v1/models`
   и положить в Redis-кеш на 12 часов.
+
+### `/settings → Агенты`
+
+Раздел «Агенты» берёт список из `AgentRegistry` и для каждого агента показывает:
+
+- ID и отображаемое имя агента;
+- описание агента;
+- фактически выбранную модель;
+- статус prompt-а: пользовательский или prompt по умолчанию;
+- безопасный preview prompt-а до 500 символов.
+
+Для каждого агента доступны действия:
+
+- **Изменить prompt** — следующий текст админа сохраняется как custom system
+  prompt для пары `(telegram_user_id, agent_id)`.
+- **Выбрать модель** — список берётся из `ModelRegistry`; выбранная модель
+  сохраняется как user-scoped override для пары `(telegram_user_id, agent_id)`.
+- **Сбросить prompt** — удаляет custom prompt пользователя, агент снова
+  использует prompt по умолчанию из `AgentRegistry`.
+
+Настройки агентов хранятся в PostgreSQL в таблице `user_agent_settings`.
+Они изолированы по Telegram user-id: один пользователь не меняет prompt/model
+другого пользователя. При LLM-запросе эти настройки применяются поверх
+существующего routing `skill → agent → model`: custom prompt заменяет system
+prompt агента, а выбранная модель заменяет модель агента для этого пользователя.
+
+Максимальная длина custom prompt задаётся переменной:
+
+```
+AGENT_PROMPT_MAX_LENGTH=8000
+```
 
 ### Настройка
 

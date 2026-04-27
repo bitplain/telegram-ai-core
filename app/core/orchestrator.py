@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from app.agents.schemas import AgentProfile
+from app.core.services.user_agent_settings import UserAgentSettingsService
 from app.core.settings_store import get_settings_store
 from app.llm.openrouter_client import (
     OpenRouterClient,
@@ -34,6 +35,7 @@ class OrchestratorPlan:
     model: ModelProfile
     temperature: float
     max_tokens: int | None
+    custom_prompt_used: bool = False
 
 
 class Orchestrator:
@@ -44,9 +46,11 @@ class Orchestrator:
         *,
         model_registry: ModelRegistry | None = None,
         client: OpenRouterClient | None = None,
+        agent_settings_service: UserAgentSettingsService | None = None,
     ) -> None:
         self._model_registry = model_registry or get_model_registry()
         self._client = client or get_openrouter_client()
+        self._agent_settings_service = agent_settings_service
 
     def plan(
         self,
@@ -97,6 +101,7 @@ class Orchestrator:
         agent: AgentProfile,
         skill: SkillProfile,
         explicit_model_id: str | None = None,
+        telegram_user_id: int | None = None,
     ) -> OrchestratorPlan:
         """То же, что ``plan``, но дополнительно применяет model_override
         из ``app_settings`` (если admin переопределил модель через /settings).
@@ -107,6 +112,11 @@ class Orchestrator:
         base_plan = self.plan(
             agent=agent, skill=skill, explicit_model_id=explicit_model_id
         )
+        if telegram_user_id is not None:
+            base_plan = await self.apply_user_agent_settings(
+                base_plan=base_plan,
+                telegram_user_id=telegram_user_id,
+            )
         store = get_settings_store()
         override = await store.get_model_override(base_plan.model.id)
         if not override:
@@ -128,6 +138,27 @@ class Orchestrator:
             model=new_model,
             temperature=base_plan.temperature,
             max_tokens=base_plan.max_tokens,
+            custom_prompt_used=base_plan.custom_prompt_used,
+        )
+
+    async def apply_user_agent_settings(
+        self,
+        *,
+        base_plan: OrchestratorPlan,
+        telegram_user_id: int,
+    ) -> OrchestratorPlan:
+        service = self._agent_settings_service or UserAgentSettingsService()
+        settings = await service.get_effective_settings(
+            telegram_user_id=telegram_user_id,
+            agent_id=base_plan.agent.id,
+        )
+        return OrchestratorPlan(
+            agent=base_plan.agent,
+            skill=base_plan.skill,
+            model=settings.effective_model,
+            temperature=base_plan.temperature,
+            max_tokens=settings.effective_model.max_output_tokens,
+            custom_prompt_used=settings.custom_prompt_used,
         )
 
     async def run(
