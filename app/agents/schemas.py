@@ -29,3 +29,4 @@ class AgentProfile(BaseModel):
     safety_level: SafetyLevel = "standard"
     allowed_tools: list[str] = Field(default_factory=list)
     enabled: bool = True
+    show_in_agent_menu: bool = True

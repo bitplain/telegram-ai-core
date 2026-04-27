@@ -24,4 +24,5 @@ FINANCE_AGENT = AgentProfile(
     safety_level="high",
     allowed_tools=[],
     enabled=True,
+    show_in_agent_menu=False,
 )

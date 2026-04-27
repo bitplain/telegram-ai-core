@@ -52,6 +52,14 @@ class AgentRegistry:
     def list_enabled(self) -> list[AgentProfile]:
         return [p for p in self._items.values() if p.enabled]
 
+    def list_agent_menu_enabled(self) -> list[AgentProfile]:
+        """Возвращает включённых агентов, доступных как спецрежимы /agent."""
+        return [
+            p
+            for p in self._items.values()
+            if p.enabled and p.show_in_agent_menu
+        ]
+
     def list_all(self) -> list[AgentProfile]:
         return list(self._items.values())
 

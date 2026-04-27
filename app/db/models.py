@@ -107,6 +107,9 @@ class Chat(Base):
 CONVERSATION_STATUS_ACTIVE = "ACTIVE"
 CONVERSATION_STATUS_CLOSED = "CLOSED"
 
+CONVERSATION_MODE_DEFAULT = "default"
+CONVERSATION_MODE_AGENT = "agent"
+
 
 class Conversation(Base):
     __tablename__ = "conversations"
@@ -138,6 +141,12 @@ class Conversation(Base):
         String(32), nullable=False, default=CONVERSATION_STATUS_ACTIVE
     )
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active_mode: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=CONVERSATION_MODE_DEFAULT,
+        server_default=CONVERSATION_MODE_DEFAULT,
+    )
     active_agent_id: Mapped[str] = mapped_column(
         String(64), nullable=False, default="general"
     )
@@ -197,6 +206,9 @@ class Message(Base):
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     direction: Mapped[str] = mapped_column(String(32), nullable=False)
     message_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    skill_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     raw_update_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
@@ -363,6 +375,8 @@ __all__ = [
     "UserAgentSetting",
     "CONVERSATION_STATUS_ACTIVE",
     "CONVERSATION_STATUS_CLOSED",
+    "CONVERSATION_MODE_DEFAULT",
+    "CONVERSATION_MODE_AGENT",
     "MESSAGE_DIRECTION_INBOUND",
     "MESSAGE_DIRECTION_OUTBOUND",
     "MESSAGE_DIRECTION_SYSTEM",

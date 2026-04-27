@@ -37,6 +37,7 @@ class ConversationRepository:
         *,
         user_id: uuid.UUID,
         chat_id: uuid.UUID,
+        default_mode: str = "default",
         default_agent_id: str = "general",
         default_skill_id: str = "chat",
         default_model_id: str = "default_balanced",
@@ -50,6 +51,7 @@ class ConversationRepository:
             user_id=user_id,
             chat_id=chat_id,
             status=CONVERSATION_STATUS_ACTIVE,
+            active_mode=default_mode,
             active_agent_id=default_agent_id,
             active_skill_id=default_skill_id,
             active_model_id=default_model_id,
@@ -64,12 +66,15 @@ class ConversationRepository:
         self,
         *,
         conversation_id: uuid.UUID,
+        active_mode: str | None = None,
         agent_id: str | None = None,
         skill_id: str | None = None,
         model_id: str | None = None,
     ) -> None:
         """Обновляет активные agent/skill/model в conversation."""
         values: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
+        if active_mode is not None:
+            values["active_mode"] = active_mode
         if agent_id is not None:
             values["active_agent_id"] = agent_id
         if skill_id is not None:
