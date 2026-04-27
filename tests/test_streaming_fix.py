@@ -30,6 +30,7 @@ class _FakeBot:
         self._send_exc = send_exc
         self.draft_calls: list[dict[str, Any]] = []
         self.send_calls: list[dict[str, Any]] = []
+        self.edit_calls: list[dict[str, Any]] = []
         self.chat_action_calls: list[dict[str, Any]] = []
 
     async def send_message_draft(self, **kwargs: Any) -> Any:
@@ -45,6 +46,7 @@ class _FakeBot:
         return _SentMessage(message_id=43)
 
     async def edit_message_text(self, **kwargs: Any) -> Any:
+        self.edit_calls.append(kwargs)
         return None
 
     async def send_chat_action(self, **kwargs: Any) -> None:
@@ -57,12 +59,12 @@ class _SentMessage:
 
 
 def _make_renderer(
-    bot: _FakeBot, *, reply_to: int | None = None
+    bot: _FakeBot, *, reply_to: int | None = None, chat_type: str = "private"
 ) -> TelegramStreamRenderer:
     return TelegramStreamRenderer(
         bot,  # type: ignore[arg-type]
         chat_id=12345,
-        chat_type="private",
+        chat_type=chat_type,
         reply_to_message_id=reply_to,
     )
 
@@ -158,3 +160,62 @@ async def test_draft_call_omits_reply_parameters_if_no_reply() -> None:
     call = bot.draft_calls[0]
     assert "reply_parameters" not in call
     assert "reply_to_message_id" not in call
+
+
+@pytest.mark.asyncio
+async def test_draft_call_uses_integer_draft_id() -> None:
+    bot = _FakeBot()
+    renderer = _make_renderer(bot)
+    ok = await renderer._try_send_draft("text")
+
+    assert ok is True
+    draft_id = bot.draft_calls[0]["draft_id"]
+    assert isinstance(draft_id, int)
+    assert draft_id > 0
+
+
+@pytest.mark.asyncio
+async def test_group_chat_does_not_call_draft() -> None:
+    bot = _FakeBot()
+    renderer = _make_renderer(bot, chat_type="supergroup")
+
+    await renderer.push("x" * 30)
+
+    assert bot.draft_calls == []
+    assert len(bot.send_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_draft_failure_uses_send_message_fallback() -> None:
+    bot = _FakeBot(draft_exc=RuntimeError)
+    renderer = _make_renderer(bot)
+
+    await renderer.push("x" * 30)
+
+    assert len(bot.draft_calls) == 1
+    assert len(bot.send_calls) == 1
+    assert renderer._used_draft is False
+
+
+@pytest.mark.asyncio
+async def test_throttling_skips_small_delta_update() -> None:
+    bot = _FakeBot()
+    renderer = _make_renderer(bot)
+
+    await renderer.push("x" * 30)
+    await renderer.push("small")
+
+    assert len(bot.draft_calls) == 1
+    assert bot.edit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_sends_final_message() -> None:
+    bot = _FakeBot()
+    renderer = _make_renderer(bot)
+
+    await renderer.push("x" * 30)
+    await renderer.finalize()
+
+    assert len(bot.send_calls) == 1
+    assert bot.send_calls[0]["text"] == "x" * 30

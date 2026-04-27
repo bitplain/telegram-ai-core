@@ -167,7 +167,12 @@ class Settings(BaseSettings):
     # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     SETTINGS_ENCRYPTION_KEY: str | None = Field(default=None)
 
-    # --- Renderer ---
+    # --- Telegram streaming renderer ---
+    TELEGRAM_DRAFT_UPDATE_INTERVAL_MS: int = 500
+    TELEGRAM_STREAM_MIN_CHARS_DELTA: int = 24
+    TELEGRAM_STREAM_DRAFT_ENABLED: bool = True
+    TELEGRAM_STREAM_EDIT_FALLBACK_ENABLED: bool = True
+    # Backward-compatible aliases for older env/config names.
     TELEGRAM_DRAFT_MIN_INTERVAL_MS: int = 500
     TELEGRAM_MIN_DELTA_CHARS: int = 24
     TELEGRAM_CHAT_ACTION_INTERVAL_SECONDS: float = 4.0
