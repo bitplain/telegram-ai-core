@@ -321,7 +321,7 @@ async def _activate_agent_mode_for_message(message: Message, agent_id: str) -> N
         repo = ConversationRepository(session)
         await repo.update_active_routing(
             conversation_id=conv.id,
-            active_mode=AGENT_MODE_DEFAULT,
+            active_mode=activation.active_mode,
             agent_id=activation.active_agent_id,
             skill_id=activation.active_skill_id,
             model_id=activation.active_model_id,
@@ -408,54 +408,6 @@ async def cb_agent_menu(callback: CallbackQuery) -> None:
         if conv is not None:
             await callback.message.edit_text(
                 _agent_menu_text(conv.active_mode, conv.active_agent_id),
-                reply_markup=_agent_menu_keyboard(
-                    show_exit=conv.active_mode == AGENT_MODE_AGENT
-                ),
-            )
-    await callback.answer()
-
-
-@router.callback_query(F.data.in_({"agent:select:crypto", "agent:select:news"}))
-async def cb_agent_select(callback: CallbackQuery) -> None:
-    if not isinstance(callback.message, Message):
-        await callback.answer()
-        return
-    agent_id = str(callback.data).rsplit(":", 1)[-1]
-    await _activate_agent_mode_for_message(callback.message, agent_id)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "agent:exit")
-async def cb_agent_exit(callback: CallbackQuery) -> None:
-    if isinstance(callback.message, Message):
-        await cmd_exit(callback.message)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "agent:settings")
-async def cb_agent_settings(callback: CallbackQuery) -> None:
-    from app.bot.handlers.settings import render_agents_settings_callback
-
-    await render_agents_settings_callback(callback)
-
-
-@router.callback_query(F.data == "agent:close")
-async def cb_agent_close(callback: CallbackQuery) -> None:
-    if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_text("Закрыто.")
-        except Exception:  # noqa: BLE001
-            log.debug("agent close: edit_text failed", exc_info=True)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "agent:menu")
-async def cb_agent_menu(callback: CallbackQuery) -> None:
-    if isinstance(callback.message, Message):
-        conv = await _ensure_conversation(callback.message)
-        if conv is not None:
-            await callback.message.edit_text(
-                _agent_menu_text(conv.active_mode, conv.active_agent_id),
                 reply_markup=_agent_menu_keyboard(show_exit=conv.active_mode == AGENT_MODE_AGENT),
             )
     await callback.answer()
@@ -503,11 +455,9 @@ async def cb_agent_exit(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "agent:settings")
 async def cb_agent_settings(callback: CallbackQuery) -> None:
-    if isinstance(callback.message, Message):
-        await callback.message.edit_text(
-            "<b>Настройки агентов</b>\n\nОткрой /settings → Агенты для настройки prompt/model агентов."
-        )
-    await callback.answer()
+    from app.bot.handlers.settings import render_agents_settings_callback
+
+    await render_agents_settings_callback(callback)
 
 
 @router.callback_query(F.data == "agent:close")
