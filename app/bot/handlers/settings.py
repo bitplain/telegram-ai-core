@@ -1,13 +1,13 @@
-"""Admin /settings: inline-меню для управления OpenRouter ключом и model overrides.
+"""Admin /settings: inline-меню для управления API-провайдерами и model overrides.
 
 Доступно только админам (``ADMIN_TELEGRAM_USER_IDS``), все ответы про секреты —
 без раскрытия значения. Используется FSM (``MemoryStorage``) для:
-- ввода нового API-ключа,
+- ввода OpenRouter API-ключа,
+- ввода Yandex API-ключа (заглушка),
 - хранения текущей страницы списка моделей и самого списка
   (чтобы не раздувать ``callback_data`` сверх 64-байтного лимита Telegram).
 
-Валидация ключа: префикс ``sk-or-v1-`` + тестовый ``GET /api/v1/key`` с этим
-ключом. При HTTP 200 — сохраняем; при ошибке — повторно prompt-им.
+OpenRouter-валидация: префикс ``sk-or-v1-`` + тестовый ``GET /api/v1/key``.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from aiogram.types import (
 )
 
 from app.bot.filters.admin import AdminFilter
-from app.config import get_settings
 from app.core.settings_store import get_settings_store
 from app.llm.openrouter_models import (
     ModelInfo,
@@ -45,19 +44,10 @@ _API_KEY_PREFIX = "sk-or-v1-"
 _VALIDATE_URL = "https://openrouter.ai/api/v1/key"
 
 
-# ---------------------------------------------------------------------------
-# FSM states
-# ---------------------------------------------------------------------------
-
-
 class SettingsStates(StatesGroup):
-    awaiting_api_key = State()
+    awaiting_openrouter_api_key = State()
+    awaiting_yandex_api_key = State()
     awaiting_model_for_profile = State()
-
-
-# ---------------------------------------------------------------------------
-# Callback factory (короткий prefix — экономим callback_data до 64 байт)
-# ---------------------------------------------------------------------------
 
 
 class SettingsCB(CallbackData, prefix="s"):
@@ -66,13 +56,7 @@ class SettingsCB(CallbackData, prefix="s"):
     arg2: str = ""
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _mask_key(value: str) -> str:
-    """Маскирует API-ключ для безопасного отображения: ``sk-or-...XXXX``."""
     if not value:
         return ""
     if len(value) <= 8:
@@ -83,7 +67,6 @@ def _mask_key(value: str) -> str:
 def _format_price(price: float | None) -> str:
     if price is None:
         return "?"
-    # OpenRouter отдаёт цену за токен; нагляднее — за 1M токенов.
     return f"${price * 1_000_000:.2f}/1M"
 
 
@@ -92,25 +75,13 @@ def _root_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Установить OpenRouter API key",
-                    callback_data=SettingsCB(action="apikey").pack(),
+                    text="Добавить API",
+                    callback_data=SettingsCB(action="providers").pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Сменить модель",
-                    callback_data=SettingsCB(action="profiles").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Обновить список моделей",
-                    callback_data=SettingsCB(action="refresh").pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Сбросить настройки",
+                    text="Сбросить настройки моделей",
                     callback_data=SettingsCB(action="reset").pack(),
                 )
             ],
@@ -124,17 +95,54 @@ def _root_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _profiles_keyboard() -> InlineKeyboardMarkup:
-    """Список ModelProfile-ов как inline-кнопки."""
-    rows: list[list[InlineKeyboardButton]] = []
-    for profile in get_model_registry().list_enabled():
+def _providers_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="OpenRouter",
+                    callback_data=SettingsCB(action="provider", arg1="openrouter").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Яндекс",
+                    callback_data=SettingsCB(action="provider", arg1="yandex").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=SettingsCB(action="root").pack(),
+                )
+            ],
+        ]
+    )
+
+
+def _openrouter_keyboard(*, has_key: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="+ API",
+                callback_data=SettingsCB(action="openrouter_add_api").pack(),
+            )
+        ]
+    ]
+    if has_key:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=profile.display_name,
-                    callback_data=SettingsCB(
-                        action="profile", arg1=profile.id
-                    ).pack(),
+                    text="Выбрать модель",
+                    callback_data=SettingsCB(action="profiles").pack(),
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Обновить список моделей",
+                    callback_data=SettingsCB(action="refresh").pack(),
                 )
             ]
         )
@@ -142,26 +150,62 @@ def _profiles_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 text="Назад",
-                callback_data=SettingsCB(action="root").pack(),
+                callback_data=SettingsCB(action="providers").pack(),
             )
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _models_page_keyboard(
-    *, page: int, total_pages: int, page_models: list[ModelInfo]
-) -> InlineKeyboardMarkup:
+def _yandex_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="+ API",
+                    callback_data=SettingsCB(action="yandex_add_api").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=SettingsCB(action="providers").pack(),
+                )
+            ],
+        ]
+    )
+
+
+def _profiles_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for profile in get_model_registry().list_enabled():
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=profile.display_name,
+                    callback_data=SettingsCB(action="profile", arg1=profile.id).pack(),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data=SettingsCB(action="provider", arg1="openrouter").pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _models_page_keyboard(*, page: int, total_pages: int, page_models: list[ModelInfo]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for idx, model in enumerate(page_models):
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"{model.provider} / {model.name}"[:64],
-                    # arg1 — page (как строка), arg2 — индекс в списке этой страницы
-                    callback_data=SettingsCB(
-                        action="pick", arg1=str(page), arg2=str(idx)
-                    ).pack(),
+                    callback_data=SettingsCB(action="pick", arg1=str(page), arg2=str(idx)).pack(),
                 )
             ]
         )
@@ -201,115 +245,151 @@ def _models_page_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# ---------------------------------------------------------------------------
-# /settings command
-# ---------------------------------------------------------------------------
+async def _render_root_message(message: Message) -> None:
+    store = get_settings_store()
+    openrouter_api_key = await store.get_openrouter_api_key()
+    has_db_openrouter_key = await store.has_db_openrouter_api_key()
+    yandex_api_key = await store.get_yandex_api_key()
+    has_db_yandex_key = await store.has_db_yandex_api_key()
+
+    openrouter_src = "БД" if has_db_openrouter_key else ("ENV" if openrouter_api_key else "не задан")
+    yandex_src = "БД" if has_db_yandex_key else "не задан"
+
+    openrouter_line = (
+        f"OpenRouter: <b>{openrouter_src}</b>"
+        + (f" ({_mask_key(openrouter_api_key or '')})" if openrouter_api_key else "")
+    )
+    yandex_line = (
+        f"Yandex: <b>{yandex_src}</b>"
+        + (f" ({_mask_key(yandex_api_key or '')})" if yandex_api_key else "")
+    )
+
+    text = (
+        "<b>Admin · /settings</b>\n\n"
+        f"{openrouter_line}\n"
+        f"{yandex_line}\n"
+        f"Шифрование БД: <b>{'включено' if store.encryption_enabled else 'выключено (plaintext)'}</b>"
+    )
+    await message.answer(text, reply_markup=_root_keyboard())
+
+
+async def _render_provider_menu(message: Message) -> None:
+    await message.edit_text("Выберите провайдера API:", reply_markup=_providers_keyboard())
+
+
+async def _render_openrouter_menu(message: Message) -> None:
+    store = get_settings_store()
+    api_key = await store.get_openrouter_api_key()
+    has_key = bool(api_key)
+    source = "БД" if await store.has_db_openrouter_api_key() else ("ENV" if api_key else "не задан")
+    body = ["<b>OpenRouter</b>"]
+    if has_key:
+        body.append(f"Ключ: <b>{source}</b> ({_mask_key(api_key or '')})")
+    else:
+        body.append("Ключ: <b>не задан</b>")
+    body.append("Добавьте ключ через + API. После успешной проверки откроется выбор моделей.")
+    await message.edit_text("\n\n".join(body), reply_markup=_openrouter_keyboard(has_key=has_key))
+
+
+async def _render_yandex_menu(message: Message) -> None:
+    store = get_settings_store()
+    api_key = await store.get_yandex_api_key()
+    source = "БД" if await store.has_db_yandex_api_key() else "не задан"
+    body = ["<b>Яндекс (заглушка)</b>"]
+    if api_key:
+        body.append(f"Ключ: <b>{source}</b> ({_mask_key(api_key)})")
+    else:
+        body.append("Ключ: <b>не задан</b>")
+    body.append("Провайдер пока не подключен к runtime. + API сохраняет ключ в настройки.")
+    await message.edit_text("\n\n".join(body), reply_markup=_yandex_keyboard())
 
 
 @settings_router.message(Command("settings"), AdminFilter())
 async def cmd_settings(message: Message, state: FSMContext) -> None:
     await state.clear()
-    store = get_settings_store()
-    api_key = await store.get_openrouter_api_key()
-    has_db_key = await store.has_db_openrouter_api_key()
-    overrides = await store.list_model_overrides()
-
-    src = "БД" if has_db_key else ("ENV" if api_key else "не задан")
-    masked = _mask_key(api_key or "")
-    if api_key and src == "БД":
-        key_line = f"Текущий ключ: <b>{src}</b> ({masked})"
-    elif api_key:
-        key_line = f"Текущий ключ: <b>{src}</b> ({masked})"
-    else:
-        key_line = "Текущий ключ: <b>не задан</b>"
-
-    overrides_block = ""
-    if overrides:
-        lines = "\n".join(
-            f"• <code>{model_id}</code> → <code>{name}</code>"
-            for model_id, name in sorted(overrides.items())
-        )
-        overrides_block = f"\n\nАктивные model overrides:\n{lines}"
-
-    text = (
-        "<b>Admin · /settings</b>\n\n"
-        f"{key_line}\n"
-        f"Шифрование БД: <b>"
-        f"{'включено' if store.encryption_enabled else 'выключено (plaintext)'}</b>"
-        f"{overrides_block}"
-    )
-    await message.answer(text, reply_markup=_root_keyboard())
+    await _render_root_message(message)
 
 
-# ---------------------------------------------------------------------------
-# Корневое меню
-# ---------------------------------------------------------------------------
-
-
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "root"), AdminFilter()
-)
-async def cb_root(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "root"), AdminFilter())
+async def cb_root(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     await state.clear()
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(
-            "<b>Admin · /settings</b>\n\nВыберите действие.",
-            reply_markup=_root_keyboard(),
-        )
+        try:
+            await callback.message.edit_text("<b>Admin · /settings</b>\n\nВыберите действие.", reply_markup=_root_keyboard())
+        except Exception:
+            await _render_root_message(callback.message)
     await callback.answer()
 
 
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "noop"), AdminFilter()
-)
+@settings_router.callback_query(SettingsCB.filter(F.action == "providers"), AdminFilter())
+async def cb_providers(callback: CallbackQuery, callback_data: SettingsCB) -> None:
+    if isinstance(callback.message, Message):
+        try:
+            await _render_provider_menu(callback.message)
+        except Exception:
+            await callback.message.answer("Выберите провайдера API:", reply_markup=_providers_keyboard())
+    await callback.answer()
+
+
+@settings_router.callback_query(SettingsCB.filter(F.action == "provider"), AdminFilter())
+async def cb_provider(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
+    await state.clear()
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    try:
+        if callback_data.arg1 == "openrouter":
+            await _render_openrouter_menu(callback.message)
+        elif callback_data.arg1 == "yandex":
+            await _render_yandex_menu(callback.message)
+        else:
+            await _render_provider_menu(callback.message)
+    except Exception:
+        log.debug("provider menu render failed", exc_info=True)
+    await callback.answer()
+
+
+@settings_router.callback_query(SettingsCB.filter(F.action == "noop"), AdminFilter())
 async def cb_noop(callback: CallbackQuery, callback_data: SettingsCB) -> None:
     await callback.answer()
 
 
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "close"), AdminFilter()
-)
-async def cb_close(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "close"), AdminFilter())
+async def cb_close(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     await state.clear()
     if isinstance(callback.message, Message):
         try:
             await callback.message.edit_text("Закрыто.")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("close: edit_text failed", exc_info=True)
     await callback.answer()
 
 
-# ---------------------------------------------------------------------------
-# Установка API key (FSM awaiting_api_key)
-# ---------------------------------------------------------------------------
-
-
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "apikey"), AdminFilter()
-)
-async def cb_apikey(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
-    await state.set_state(SettingsStates.awaiting_api_key)
+@settings_router.callback_query(SettingsCB.filter(F.action == "openrouter_add_api"), AdminFilter())
+async def cb_openrouter_add_api(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.awaiting_openrouter_api_key)
     if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception:  # noqa: BLE001
-            log.debug("apikey: edit_reply_markup failed", exc_info=True)
         await callback.message.answer(
-            "Отправь новый OpenRouter API key одним сообщением "
+            "Отправь OpenRouter API key одним сообщением "
             f"(префикс <code>{_API_KEY_PREFIX}</code>).\n"
-            "Ключ будет проверен через <code>GET /api/v1/key</code> и сохранён."
+            "Ключ будет проверен через <code>GET /api/v1/key</code>."
         )
     await callback.answer()
 
 
-@settings_router.message(SettingsStates.awaiting_api_key, AdminFilter())
-async def on_api_key_message(message: Message, state: FSMContext) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "yandex_add_api"), AdminFilter())
+async def cb_yandex_add_api(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.awaiting_yandex_api_key)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Отправь Yandex API key одним сообщением.\n"
+            "Это заглушка: ключ сохранится, но пока не используется в runtime."
+        )
+    await callback.answer()
+
+
+@settings_router.message(SettingsStates.awaiting_openrouter_api_key, AdminFilter())
+async def on_openrouter_api_key_message(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw:
         await message.answer("Пустое сообщение. Отправь ключ ещё раз или /cancel.")
@@ -321,30 +401,54 @@ async def on_api_key_message(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Удалим сообщение пользователя, чтобы ключ не светился в чате.
     try:
         await message.delete()
-    except Exception:  # noqa: BLE001
-        log.debug("Could not delete user message with API key", exc_info=True)
+    except Exception:
+        log.debug("Could not delete user message with OpenRouter API key", exc_info=True)
 
     ok, detail = await _validate_openrouter_key(raw)
     if not ok:
-        await message.answer(
-            f"Ключ не прошёл валидацию: {detail}\nПопробуй ещё раз или /cancel."
-        )
+        await message.answer(f"Ключ не прошёл валидацию: {detail}\nПопробуй ещё раз или /cancel.")
         return
 
     if message.from_user is None:
         await state.clear()
         return
+
     store = get_settings_store()
     await store.set_openrouter_api_key(raw, by_user_id=message.from_user.id)
     await state.clear()
 
     enc = "включено" if store.encryption_enabled else "выключено (plaintext)"
     await message.answer(
-        f"Ключ обновлён. Шифрование: <b>{enc}</b>.\n{detail}",
-        reply_markup=_root_keyboard(),
+        f"OpenRouter ключ обновлён. Шифрование: <b>{enc}</b>.\n{detail}",
+        reply_markup=_openrouter_keyboard(has_key=True),
+    )
+
+
+@settings_router.message(SettingsStates.awaiting_yandex_api_key, AdminFilter())
+async def on_yandex_api_key_message(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустое сообщение. Отправь ключ ещё раз или /cancel.")
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        log.debug("Could not delete user message with Yandex API key", exc_info=True)
+
+    if message.from_user is None:
+        await state.clear()
+        return
+
+    store = get_settings_store()
+    await store.set_yandex_api_key(raw, by_user_id=message.from_user.id)
+    await state.clear()
+
+    await message.answer(
+        "Yandex API key сохранён как заглушка. Интеграция провайдера пока не подключена.",
+        reply_markup=_yandex_keyboard(),
     )
 
 
@@ -359,7 +463,6 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 
 async def _validate_openrouter_key(api_key: str) -> tuple[bool, str]:
-    """``GET /api/v1/key`` с переданным Bearer. True если 2xx."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             response = await client.get(
@@ -377,81 +480,52 @@ async def _validate_openrouter_key(api_key: str) -> tuple[bool, str]:
             usage = payload.get("usage")
             if limit is not None and usage is not None:
                 return True, f"квота {usage} / {limit}"
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("Failed to parse /key response", exc_info=True)
         return True, "ключ валиден"
     if response.status_code in (401, 403):
-        return False, "Telegram отверг ключ (401/403)"
+        return False, "OpenRouter отверг ключ (401/403)"
     return False, f"HTTP {response.status_code}"
 
 
-# ---------------------------------------------------------------------------
-# Сброс
-# ---------------------------------------------------------------------------
-
-
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "reset"), AdminFilter()
-)
-async def cb_reset(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "reset"), AdminFilter())
+async def cb_reset(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     await state.clear()
     store = get_settings_store()
     await store.reset_all_overrides()
     if isinstance(callback.message, Message):
         try:
             await callback.message.edit_text(
-                "Все model overrides удалены. API-ключ остался без изменений.",
+                "Все model overrides удалены. API-ключи остались без изменений.",
                 reply_markup=_root_keyboard(),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("reset: edit_text failed", exc_info=True)
     await callback.answer("Готово")
 
 
-# ---------------------------------------------------------------------------
-# Refresh — принудительно перетянуть список моделей
-# ---------------------------------------------------------------------------
-
-
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "refresh"), AdminFilter()
-)
-async def cb_refresh(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "refresh"), AdminFilter())
+async def cb_refresh(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     await state.clear()
     models = await get_openrouter_models_client().fetch(force=True)
     text = f"Список моделей обновлён. Доступно: <b>{len(models)}</b>."
     if isinstance(callback.message, Message):
         try:
-            await callback.message.edit_text(
-                text, reply_markup=_root_keyboard()
-            )
-        except Exception:  # noqa: BLE001
-            await callback.message.answer(text, reply_markup=_root_keyboard())
+            await callback.message.edit_text(text, reply_markup=_openrouter_keyboard(has_key=True))
+        except Exception:
+            await callback.message.answer(text, reply_markup=_openrouter_keyboard(has_key=True))
     await callback.answer("Готово")
 
 
-# ---------------------------------------------------------------------------
-# Profiles → выбор ModelProfile
-# ---------------------------------------------------------------------------
-
-
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "profiles"), AdminFilter()
-)
-async def cb_profiles(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "profiles"), AdminFilter())
+async def cb_profiles(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     if isinstance(callback.message, Message):
         try:
             await callback.message.edit_text(
                 "Выберите профиль модели для переопределения:",
                 reply_markup=_profiles_keyboard(),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             await callback.message.answer(
                 "Выберите профиль модели для переопределения:",
                 reply_markup=_profiles_keyboard(),
@@ -459,12 +533,8 @@ async def cb_profiles(
     await callback.answer()
 
 
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "profile"), AdminFilter()
-)
-async def cb_profile(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "profile"), AdminFilter())
+async def cb_profile(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     profile_id = callback_data.arg1
     profile = get_model_registry().get_or_none(profile_id)
     if profile is None:
@@ -473,18 +543,12 @@ async def cb_profile(
 
     models = await get_openrouter_models_client().fetch(force=False)
     if not models:
-        await callback.answer(
-            "Список моделей пуст. Сначала «Обновить список моделей».",
-            show_alert=True,
-        )
+        await callback.answer("Список моделей пуст. Сначала «Обновить список моделей».", show_alert=True)
         return
 
     await state.set_state(SettingsStates.awaiting_model_for_profile)
-    # Сохраняем full list + profile_id в FSM, чтобы callback_data оставался
-    # коротким (только индекс модели на странице).
     await state.update_data(
         profile_id=profile_id,
-        # ModelInfo dataclass — сериализуем в dict-ы для хранения в FSM.
         models=[
             {
                 "id": m.id,
@@ -500,12 +564,8 @@ async def cb_profile(
     await _render_models_page(callback, state, page=0)
 
 
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "page"), AdminFilter()
-)
-async def cb_page(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "page"), AdminFilter())
+async def cb_page(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     try:
         page = int(callback_data.arg1)
     except ValueError:
@@ -514,16 +574,12 @@ async def cb_page(
     await _render_models_page(callback, state, page=page)
 
 
-async def _render_models_page(
-    callback: CallbackQuery, state: FSMContext, *, page: int
-) -> None:
+async def _render_models_page(callback: CallbackQuery, state: FSMContext, *, page: int) -> None:
     data = await state.get_data()
     models_data = data.get("models") or []
     profile_id = data.get("profile_id") or ""
     if not models_data or not profile_id:
-        await callback.answer(
-            "Сессия истекла, открой /settings заново.", show_alert=True
-        )
+        await callback.answer("Сессия истекла, открой /settings заново.", show_alert=True)
         return
 
     total = len(models_data)
@@ -555,27 +611,17 @@ async def _render_models_page(
             f"completion {_format_price(model.pricing_completion)}"
         )
 
-    keyboard = _models_page_keyboard(
-        page=page, total_pages=total_pages, page_models=page_models
-    )
+    keyboard = _models_page_keyboard(page=page, total_pages=total_pages, page_models=page_models)
     if isinstance(callback.message, Message):
         try:
-            await callback.message.edit_text(
-                "\n".join(lines), reply_markup=keyboard
-            )
-        except Exception:  # noqa: BLE001
-            await callback.message.answer(
-                "\n".join(lines), reply_markup=keyboard
-            )
+            await callback.message.edit_text("\n".join(lines), reply_markup=keyboard)
+        except Exception:
+            await callback.message.answer("\n".join(lines), reply_markup=keyboard)
     await callback.answer()
 
 
-@settings_router.callback_query(
-    SettingsCB.filter(F.action == "pick"), AdminFilter()
-)
-async def cb_pick(
-    callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext
-) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "pick"), AdminFilter())
+async def cb_pick(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     try:
         page = int(callback_data.arg1)
         idx = int(callback_data.arg2)
@@ -587,9 +633,7 @@ async def cb_pick(
     models_data = data.get("models") or []
     profile_id = data.get("profile_id") or ""
     if not models_data or not profile_id:
-        await callback.answer(
-            "Сессия истекла, открой /settings заново.", show_alert=True
-        )
+        await callback.answer("Сессия истекла, открой /settings заново.", show_alert=True)
         return
 
     absolute_idx = page * _PAGE_SIZE + idx
@@ -610,15 +654,12 @@ async def cb_pick(
 
     profile = get_model_registry().get_or_none(profile_id)
     title = profile.display_name if profile else profile_id
-    text = (
-        f"Профиль <b>{title}</b> теперь использует модель "
-        f"<code>{chosen_id}</code>."
-    )
+    text = f"Профиль <b>{title}</b> теперь использует модель <code>{chosen_id}</code>."
     if isinstance(callback.message, Message):
         try:
-            await callback.message.edit_text(text, reply_markup=_root_keyboard())
-        except Exception:  # noqa: BLE001
-            await callback.message.answer(text, reply_markup=_root_keyboard())
+            await callback.message.edit_text(text, reply_markup=_openrouter_keyboard(has_key=True))
+        except Exception:
+            await callback.message.answer(text, reply_markup=_openrouter_keyboard(has_key=True))
     await callback.answer("Сохранено")
 
 

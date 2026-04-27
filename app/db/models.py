@@ -281,6 +281,8 @@ class AppSetting(Base):
     Используемые ключи:
     - ``openrouter_api_key`` — переопределение ENV-ключа OpenRouter (encrypted,
       если задан SETTINGS_ENCRYPTION_KEY).
+    - ``yandex_api_key`` — API-ключ Яндекс-провайдера (пока используется как
+      сохраняемая заглушка для будущей интеграции).
     - ``model_override.<model_id>`` — переопределение OpenRouter slug-а для
       конкретного ModelProfile, например ``model_override.default_balanced``.
     """
