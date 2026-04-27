@@ -708,13 +708,10 @@ async def cb_fav_pick(callback: CallbackQuery, callback_data: SettingsCB, state:
         await callback.answer("Модель без id", show_alert=True)
         return
     store = get_settings_store()
-    favorites = set(await store.list_openrouter_favorite_models())
-    if slug in favorites:
-        await store.remove_openrouter_favorite_model(slug, by_user_id=callback.from_user.id)
-        await callback.answer("Убрано из избранного")
-    else:
-        await store.add_openrouter_favorite_model(slug, by_user_id=callback.from_user.id)
-        await callback.answer("Добавлено в избранное")
+    added, _ = await store.toggle_openrouter_favorite_model(
+        slug, by_user_id=callback.from_user.id
+    )
+    await callback.answer("Добавлено в избранное" if added else "Убрано из избранного")
     await _render_models_page(callback, state, page=page)
 
 

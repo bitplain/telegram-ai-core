@@ -189,6 +189,28 @@ class SettingsStore:
         await self.set_openrouter_favorite_models(current, by_user_id=by_user_id)
         return added, current
 
+    async def add_openrouter_favorite_model(
+        self, model_id: str, by_user_id: int
+    ) -> list[str]:
+        """Добавляет OpenRouter model slug в избранное идемпотентно."""
+        model_id = (model_id or "").strip()
+        current = await self.list_openrouter_favorite_models()
+        if model_id and model_id not in current:
+            current.append(model_id)
+            await self.set_openrouter_favorite_models(current, by_user_id=by_user_id)
+        return current
+
+    async def remove_openrouter_favorite_model(
+        self, model_id: str, by_user_id: int
+    ) -> list[str]:
+        """Удаляет OpenRouter model slug из избранного идемпотентно."""
+        model_id = (model_id or "").strip()
+        current = await self.list_openrouter_favorite_models()
+        if model_id and model_id in current:
+            current = [item for item in current if item != model_id]
+            await self.set_openrouter_favorite_models(current, by_user_id=by_user_id)
+        return current
+
     async def get_model_override(self, model_id: str) -> str | None:
         """Возвращает OpenRouter slug-override для ModelProfile, либо None."""
         if not model_id:
