@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     TELEGRAM_WEBHOOK_URL: str = ""
     TELEGRAM_WEBHOOK_PATH: str = "/telegram/webhook"
     TELEGRAM_WEBHOOK_SECRET: str = ""
+    # Публичный базовый URL приложения (без завершающего /). Для webhook:
+    # ``{PUBLIC_API_URL}/telegram/webhook`` (путь берётся из TELEGRAM_WEBHOOK_PATH).
+    PUBLIC_API_URL: str = ""
 
     # --- OpenRouter ---
     OPENROUTER_API_KEY: str = ""
@@ -334,6 +337,15 @@ class Settings(BaseSettings):
         """В этих окружениях DATABASE_URL/REDIS_URL обязаны быть заданы."""
         return self.APP_ENV in {"railway", "production"}
 
+    @property
+    def telegram_webhook_full_url(self) -> str:
+        """Полный HTTPS URL webhook, если задан ``PUBLIC_API_URL``."""
+        base = (self.PUBLIC_API_URL or "").strip().rstrip("/")
+        path = (self.TELEGRAM_WEBHOOK_PATH or "/telegram/webhook").strip()
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{base}{path}" if base else ""
+
     # --- Admin ---
 
     @property
@@ -404,6 +416,17 @@ class Settings(BaseSettings):
             if not self.OPENROUTER_API_KEY:
                 log.warning(
                     "OPENROUTER_API_KEY is empty in strict env — bot will not call LLM."
+                )
+        if self.TELEGRAM_MODE == "webhook":
+            if not (self.PUBLIC_API_URL or "").strip():
+                raise ConfigError(
+                    "TELEGRAM_MODE=webhook требует непустой PUBLIC_API_URL "
+                    "(базовый URL сервиса без завершающего /)."
+                )
+            if not (self.TELEGRAM_WEBHOOK_SECRET or "").strip():
+                raise ConfigError(
+                    "TELEGRAM_MODE=webhook требует TELEGRAM_WEBHOOK_SECRET "
+                    "(заголовок X-Telegram-Bot-Api-Secret-Token)."
                 )
         return self
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -15,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -293,12 +295,12 @@ class AppSetting(Base):
     """Runtime-настройки приложения (key/value) с опциональным шифрованием.
 
     Используемые ключи:
-    - ``openrouter_api_key`` — переопределение ENV-ключа OpenRouter (encrypted,
-      если задан SETTINGS_ENCRYPTION_KEY).
     - ``yandex_api_key`` — API-ключ Яндекс-провайдера (пока используется как
       сохраняемая заглушка для будущей интеграции).
     - ``model_override.<model_id>`` — переопределение OpenRouter slug-а для
       конкретного ModelProfile, например ``model_override.default_balanced``.
+
+    Провайдерские API-ключи (OpenRouter и др.) в БД не хранятся — только ENV.
     """
 
     __tablename__ = "app_settings"
@@ -365,6 +367,84 @@ class UserAgentSetting(Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# memories — user long-term notes (MVP)
+# ---------------------------------------------------------------------------
+
+MEMORY_SCOPE_GLOBAL = "global"
+MEMORY_SCOPE_AGENT = "agent"
+
+
+class Memory(Base):
+    __tablename__ = "memories"
+    __table_args__ = (
+        Index("ix_memories_user_scope_created", "user_id", "scope", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    def preview(self, *, max_len: int = 120) -> str:
+        t = (self.content or "").strip().replace("\n", " ")
+        if len(t) <= max_len:
+            return t
+        return t[: max_len - 1].rstrip() + "…"
+
+
+# ---------------------------------------------------------------------------
+# portfolio_assets — manual holdings (MVP)
+# ---------------------------------------------------------------------------
+
+
+class PortfolioAsset(Base):
+    __tablename__ = "portfolio_assets"
+    __table_args__ = (
+        Index(
+            "ix_portfolio_user_symbol_network",
+            "user_id",
+            "symbol",
+            "network",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    average_buy_price: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 __all__ = [
     "Base",
     "User",
@@ -375,6 +455,10 @@ __all__ = [
     "ProcessedUpdate",
     "AppSetting",
     "UserAgentSetting",
+    "Memory",
+    "PortfolioAsset",
+    "MEMORY_SCOPE_GLOBAL",
+    "MEMORY_SCOPE_AGENT",
     "CONVERSATION_STATUS_ACTIVE",
     "CONVERSATION_STATUS_CLOSED",
     "CONVERSATION_MODE_DEFAULT",

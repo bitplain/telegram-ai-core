@@ -19,10 +19,14 @@ from app.core.prompts import (
     OPENROUTER_NOT_CONFIGURED,
     RATE_LIMIT_MESSAGE,
 )
+from app.config import get_settings
 from app.core.rate_limit import RateLimiter
 from app.core.usage_limits import UsageLimiter
+from app.core.security.sensitive_input_guard import (
+    SENSITIVE_INPUT_BLOCKED_MESSAGE,
+    is_sensitive_user_text,
+)
 from app.core.services.user_agent_settings import UserAgentSettingsService
-from app.core.settings_store import get_settings_store
 from app.db.models import (
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
@@ -31,6 +35,7 @@ from app.db.models import (
 from app.db.repositories.chats import ChatRepository
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.llm_requests import LLMRequestRepository
+from app.db.repositories.memories import MemoryRepository, memory_context_block
 from app.db.repositories.messages import MessageRepository
 from app.db.repositories.users import UserRepository
 from app.db.session import session_scope
@@ -152,6 +157,14 @@ async def process_user_message(
     agent = runtime_context.agent_profile
     user_text = runtime_context.cleaned_text or text
 
+    if is_sensitive_user_text(user_text):
+        log.info(
+            "sensitive_input_blocked",
+            extra={"telegram_user_id": message.from_user.id},
+        )
+        await send_plain(message.bot, message.chat.id, SENSITIVE_INPUT_BLOCKED_MESSAGE)
+        return
+
     # Если skill пришёл по команде — обновим conversation.active_* в default-mode.
     if runtime_context.matched_by == "command":
         async with session_scope() as session:
@@ -176,11 +189,9 @@ async def process_user_message(
             )
             return
 
-    # 5) Если OpenRouter не настроен — отвечаем заглушкой.
-    # Учитываем как ENV, так и БД-override (admin /settings).
+    # 5) Если OpenRouter не настроен — отвечаем заглушкой (ключ только из ENV).
     or_client = get_openrouter_client()
-    effective_api_key = await get_settings_store().get_openrouter_api_key()
-    if not effective_api_key:
+    if not (get_settings().OPENROUTER_API_KEY or "").strip():
         await send_plain(message.bot, message.chat.id, OPENROUTER_NOT_CONFIGURED)
         return
 
@@ -209,6 +220,17 @@ async def process_user_message(
             },
         )
 
+    memory_ctx = ""
+    async with session_scope() as session:
+        mem_repo = MemoryRepository(session)
+        global_mem = await mem_repo.list_global_memories(user_id=user_id)
+        agent_mem = await mem_repo.list_agent_memories(
+            user_id=user_id, agent_id=agent.id
+        )
+        memory_ctx = memory_context_block(
+            global_memories=global_mem, agent_memories=agent_mem
+        )
+
     async with session_scope() as session:
         msg_repo = MessageRepository(session)
         await msg_repo.add(
@@ -234,6 +256,7 @@ async def process_user_message(
             agent=agent,
             history_agent_id=agent.id,
             system_prompt_override=effective_agent_settings.effective_prompt,
+            memory_context=memory_ctx or None,
         )
 
     # 7) Стартуем LLM-стрим и рендерим в Telegram.

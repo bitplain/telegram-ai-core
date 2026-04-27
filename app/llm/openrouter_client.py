@@ -70,14 +70,8 @@ class OpenRouterClient:
         return bool(self._api_key)
 
     async def is_configured_async(self) -> bool:
-        """True, если ключ есть либо в ENV, либо в БД (через settings_store)."""
-        if self._api_key:
-            return True
-        # Локальный импорт, чтобы избежать циклической зависимости.
-        from app.core.settings_store import get_settings_store
-
-        store = get_settings_store()
-        return bool(await store.get_openrouter_api_key())
+        """True, если ключ задан в ENV (async-симметрия с sync API)."""
+        return bool(self._api_key)
 
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -122,8 +116,8 @@ class OpenRouterClient:
         Yield-ит StreamingChunk с дельтой контента. Аккуратно закрывает stream.
         При сетевых ошибках бросает OpenRouterError с человекочитаемым описанием.
 
-        ``api_key_override`` позволяет orchestrator-у подсунуть ключ из БД
-        (см. ``app.core.settings_store``) без перестройки клиента.
+        ``api_key_override`` позволяет orchestrator-у подставить ключ явно
+        (по умолчанию берётся из ENV на клиенте).
         """
         client = self._ensure_client()
         payload: dict[str, Any] = {

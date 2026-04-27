@@ -1,15 +1,15 @@
-"""Хранилище runtime-настроек: OpenRouter API key и model overrides.
+"""Хранилище runtime-настроек: model overrides и прочие не-секретные ключи.
+
+OpenRouter и прочие provider API keys **не** хранятся в БД — только в ENV.
 
 Слои:
-1. Redis-кеш (TTL 60s) — горячий путь для каждого LLM-запроса.
-2. PostgreSQL ``app_settings`` — источник истины.
-3. ENV — fallback для OpenRouter API key, если в БД ничего не лежит.
+1. Redis-кеш (TTL 60s).
+2. PostgreSQL ``app_settings`` — источник истины для overrides.
 
 Шифрование (Fernet) включается, если задан ``SETTINGS_ENCRYPTION_KEY``;
-если ключа нет — секреты лежат в БД в открытом виде, и в лог пишется warning.
+для Yandex API key (заглушка) применяется то же шифрование.
 
-Singleton: ``get_settings_store()``. Все методы — async, чтобы безопасно
-вызываться из обработчиков и оркестратора.
+Singleton: ``get_settings_store()``. Все методы — async.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ log = logging.getLogger(__name__)
 class SettingsStore:
     """Async-обёртка над таблицей ``app_settings`` с Redis-кешем."""
 
-    SETTING_OPENROUTER_API_KEY = "openrouter_api_key"
     SETTING_YANDEX_API_KEY = "yandex_api_key"
     SETTING_OPENROUTER_FAVORITE_MODELS = "openrouter_favorite_models"
     MODEL_OVERRIDE_PREFIX = "model_override."
@@ -53,7 +52,6 @@ class SettingsStore:
         try:
             return Fernet(key.encode("utf-8"))
         except Exception:  # noqa: BLE001
-            # Невалидный ключ — деградируем, но громко логируем.
             log.exception(
                 "SETTINGS_ENCRYPTION_KEY is set but invalid; secrets will be stored in plaintext"
             )
@@ -62,36 +60,6 @@ class SettingsStore:
     @property
     def encryption_enabled(self) -> bool:
         return self._fernet is not None
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    async def get_openrouter_api_key(self) -> str | None:
-        """Актуальный ключ: БД (раскриптованный) → ENV-fallback."""
-        cached = await self._cache_get(self.SETTING_OPENROUTER_API_KEY)
-        if cached is not None:
-            return cached if cached != self._NULL_SENTINEL else None
-
-        value, is_encrypted = await self._db_get(self.SETTING_OPENROUTER_API_KEY)
-        if value is not None:
-            decrypted = self._decrypt(value, is_encrypted)
-            if decrypted is not None:
-                await self._cache_set(self.SETTING_OPENROUTER_API_KEY, decrypted)
-                return decrypted
-
-        env_value = (get_settings().OPENROUTER_API_KEY or "").strip()
-        if env_value:
-            await self._cache_set(self.SETTING_OPENROUTER_API_KEY, env_value)
-            return env_value
-
-        await self._cache_set(self.SETTING_OPENROUTER_API_KEY, self._NULL_SENTINEL)
-        return None
-
-    async def has_db_openrouter_api_key(self) -> bool:
-        """True, если ключ задан именно в БД (для индикации источника в /status)."""
-        value, _ = await self._db_get(self.SETTING_OPENROUTER_API_KEY)
-        return value is not None and value != ""
 
     async def get_yandex_api_key(self) -> str | None:
         """Актуальный Yandex API key из БД (ENV-fallback не используется)."""
@@ -116,17 +84,6 @@ class SettingsStore:
         """True, если Yandex API ключ задан в БД."""
         value, _ = await self._db_get(self.SETTING_YANDEX_API_KEY)
         return value is not None and value != ""
-
-    async def set_openrouter_api_key(self, value: str, by_user_id: int) -> None:
-        """Сохраняет (с шифрованием, если возможно) и инвалидирует кеш."""
-        stored, is_encrypted = self._encrypt(value)
-        await self._db_upsert(
-            key=self.SETTING_OPENROUTER_API_KEY,
-            value=stored,
-            is_encrypted=is_encrypted,
-            by_user_id=by_user_id,
-        )
-        await self._cache_invalidate(self.SETTING_OPENROUTER_API_KEY)
 
     async def set_yandex_api_key(self, value: str, by_user_id: int) -> None:
         """Сохраняет Yandex API ключ (пока заглушка для будущей интеграции)."""
@@ -239,7 +196,6 @@ class SettingsStore:
         if not model_id or not model_name:
             return
         full_key = f"{self.MODEL_OVERRIDE_PREFIX}{model_id}"
-        # Override-ы не секрет, но мы храним их единообразно — без шифрования.
         await self._db_upsert(
             key=full_key,
             value=model_name,
@@ -300,10 +256,6 @@ class SettingsStore:
             return []
         return cls._normalize_favorite_models([str(item) for item in data])
 
-    # ------------------------------------------------------------------
-    # Encryption helpers
-    # ------------------------------------------------------------------
-
     def _encrypt(self, value: str) -> tuple[str, bool]:
         """Возвращает (stored_value, is_encrypted_flag)."""
         if self._fernet is None:
@@ -330,10 +282,6 @@ class SettingsStore:
         except Exception:  # noqa: BLE001
             log.exception("Unexpected error while decrypting app_settings value")
             return None
-
-    # ------------------------------------------------------------------
-    # DB layer
-    # ------------------------------------------------------------------
 
     @staticmethod
     async def _db_get(key: str) -> tuple[str | None, bool]:
@@ -371,10 +319,6 @@ class SettingsStore:
                 existing.is_encrypted = is_encrypted
                 existing.updated_at = now
                 existing.updated_by_telegram_user_id = by_user_id
-
-    # ------------------------------------------------------------------
-    # Redis cache layer (graceful degradation if Redis is down)
-    # ------------------------------------------------------------------
 
     async def _cache_get(self, key: str) -> str | None:
         client = get_redis()

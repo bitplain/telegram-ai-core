@@ -63,11 +63,38 @@ async def lifespan(app: FastAPI):
                 )
                 log.info("Telegram polling task started")
             else:
-                log.info("Telegram mode=webhook — polling not started")
+                webhook_url = settings.telegram_webhook_full_url
+                secret = (settings.TELEGRAM_WEBHOOK_SECRET or "").strip()
+                try:
+                    await bot.set_webhook(
+                        url=webhook_url,
+                        secret_token=secret,
+                    )
+                    log.info(
+                        "telegram_webhook_set_ok",
+                        extra={
+                            "webhook_host": (
+                                webhook_url.split("/")[2]
+                                if "://" in webhook_url
+                                else "unknown"
+                            )
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("telegram_webhook_set_failed")
         else:
             log.warning("Failed to create bot instance")
+            if settings.TELEGRAM_MODE == "webhook":
+                log.error(
+                    "TELEGRAM_MODE=webhook but bot could not be created; "
+                    "check TELEGRAM_BOT_TOKEN"
+                )
     else:
         log.warning("TELEGRAM_BOT_TOKEN is empty, polling is disabled.")
+        if settings.TELEGRAM_MODE == "webhook":
+            log.error(
+                "TELEGRAM_MODE=webhook requires TELEGRAM_BOT_TOKEN to register webhook"
+            )
 
     try:
         yield

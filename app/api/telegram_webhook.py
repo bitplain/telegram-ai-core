@@ -1,12 +1,4 @@
-"""Endpoint для Telegram webhook (заложен, но MVP работает в polling-режиме).
-
-Если ``TELEGRAM_MODE=webhook`` и заданы ``TELEGRAM_WEBHOOK_URL`` и
-``TELEGRAM_WEBHOOK_SECRET``, FastAPI принимает апдейты по
-``TELEGRAM_WEBHOOK_PATH`` и проксирует их в aiogram-диспетчер.
-
-Для MVP реализация компактная — нужна, чтобы маршрут существовал и проходил
-валидацию заголовка X-Telegram-Bot-Api-Secret-Token.
-"""
+"""Endpoint для Telegram webhook (FastAPI + aiogram dispatcher)."""
 
 from __future__ import annotations
 
@@ -32,13 +24,15 @@ async def telegram_webhook(
     settings = get_settings()
 
     if settings.TELEGRAM_MODE != "webhook":
-        # MVP режим — webhook не активен. Возвращаем 200 без обработки,
-        # чтобы Telegram не ретраил.
-        return JSONResponse({"status": "disabled"}, status_code=200)
+        raise HTTPException(status_code=503, detail="webhook mode is disabled")
 
-    if settings.TELEGRAM_WEBHOOK_SECRET:
-        if x_telegram_bot_api_secret_token != settings.TELEGRAM_WEBHOOK_SECRET:
-            raise HTTPException(status_code=401, detail="invalid secret token")
+    expected = (settings.TELEGRAM_WEBHOOK_SECRET or "").strip()
+    if not expected or x_telegram_bot_api_secret_token != expected:
+        log.warning(
+            "telegram_webhook_secret_rejected",
+            extra={"has_header": x_telegram_bot_api_secret_token is not None},
+        )
+        raise HTTPException(status_code=403, detail="invalid secret token")
 
     bot: Bot | None = getattr(request.app.state, "bot", None)
     dispatcher: Dispatcher | None = getattr(request.app.state, "dispatcher", None)
