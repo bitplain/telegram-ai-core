@@ -306,6 +306,51 @@ class AppSetting(Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# user_agent_settings — пользовательские override-ы prompt/model для агентов
+# ---------------------------------------------------------------------------
+
+
+class UserAgentSetting(Base):
+    """User-scoped настройки агента.
+
+    Настройки привязаны к Telegram user-id и agent_id:
+    - ``custom_prompt`` заменяет system prompt агента для конкретного пользователя;
+    - ``model_id`` переопределяет модель агента для конкретного пользователя.
+    """
+
+    __tablename__ = "user_agent_settings"
+    __table_args__ = (
+        UniqueConstraint(
+            "telegram_user_id",
+            "agent_id",
+            name="uq_user_agent_settings_user_agent",
+        ),
+        Index("ix_user_agent_settings_telegram_user_id", "telegram_user_id"),
+        Index("ix_user_agent_settings_agent_id", "agent_id"),
+        Index("ix_user_agent_settings_model_id", "model_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+
 __all__ = [
     "Base",
     "User",
@@ -315,6 +360,7 @@ __all__ = [
     "LLMRequest",
     "ProcessedUpdate",
     "AppSetting",
+    "UserAgentSetting",
     "CONVERSATION_STATUS_ACTIVE",
     "CONVERSATION_STATUS_CLOSED",
     "MESSAGE_DIRECTION_INBOUND",

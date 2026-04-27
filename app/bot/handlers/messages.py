@@ -20,6 +20,7 @@ from app.core.prompts import (
     RATE_LIMIT_MESSAGE,
 )
 from app.core.rate_limit import RateLimiter
+from app.core.services.user_agent_settings import UserAgentSettingsService
 from app.core.settings_store import get_settings_store
 from app.db.models import (
     MESSAGE_DIRECTION_INBOUND,
@@ -172,13 +173,11 @@ async def process_user_message(
             message_type=MESSAGE_TYPE_TEXT,
         )
 
-    orchestrator = Orchestrator(client=or_client)
-    plan = await orchestrator.plan_async(
-        agent=agent,
-        skill=skill,
-        explicit_model_id=None,  # активная модель из conversation учитывается через update_active_routing
+    agent_settings_service = UserAgentSettingsService()
+    orchestrator = Orchestrator(
+        client=or_client,
+        agent_settings_service=agent_settings_service,
     )
-
     async with session_scope() as session:
         cb = ContextBuilder(session)
         # Перечитаем conversation, чтобы получить свежее состояние active_*.
@@ -188,9 +187,27 @@ async def process_user_message(
         )
         agent = await cb.resolve_agent(conversation)
         # План мог зависеть от другого агента — перестроим под актуальный.
-        plan = await orchestrator.plan_async(agent=agent, skill=skill)
+        effective_agent_settings = await agent_settings_service.get_effective_settings(
+            telegram_user_id=message.from_user.id,
+            agent_id=agent.id,
+        )
+        plan = await orchestrator.plan_async(
+            agent=agent,
+            skill=skill,
+            telegram_user_id=message.from_user.id,
+        )
+        if effective_agent_settings.custom_prompt_used:
+            log.info(
+                "Using custom agent prompt",
+                extra={
+                    "telegram_user_id": message.from_user.id,
+                    "agent_id": agent.id,
+                },
+            )
         messages_payload = await cb.build_messages(
-            conversation=conversation, agent=agent
+            conversation=conversation,
+            agent=agent,
+            system_prompt_override=effective_agent_settings.effective_prompt,
         )
 
     # 8) Стартуем LLM-стрим и рендерим в Telegram.

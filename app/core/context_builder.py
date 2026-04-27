@@ -59,6 +59,7 @@ class ContextBuilder:
         *,
         conversation: Conversation,
         agent: AgentProfile,
+        system_prompt_override: str | None = None,
         extra_user_text: str | None = None,
     ) -> list[dict[str, str]]:
         """Возвращает список сообщений {role, content} для chat completions.
@@ -77,9 +78,8 @@ class ContextBuilder:
             conversation_id=conversation.id, limit=agent.max_context_messages
         )
 
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": agent.system_prompt}
-        ]
+        system_prompt = system_prompt_override or agent.system_prompt
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
         for msg in history:
             if msg.direction == MESSAGE_DIRECTION_INBOUND:

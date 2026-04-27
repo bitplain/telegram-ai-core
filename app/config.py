@@ -124,6 +124,7 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: int = 120
     RATE_LIMIT_MESSAGES: int = 30
     RATE_LIMIT_WINDOW_SECONDS: int = 3600
+    AGENT_PROMPT_MAX_LENGTH: int = 8000
 
     # --- Database (полный набор поддерживаемых источников) ---
     DATABASE_URL: str = ""
