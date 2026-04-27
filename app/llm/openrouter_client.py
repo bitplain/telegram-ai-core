@@ -66,7 +66,18 @@ class OpenRouterClient:
 
     @property
     def is_configured(self) -> bool:
+        """True, если ключ задан в ENV. Не учитывает БД-override."""
         return bool(self._api_key)
+
+    async def is_configured_async(self) -> bool:
+        """True, если ключ есть либо в ENV, либо в БД (через settings_store)."""
+        if self._api_key:
+            return True
+        # Локальный импорт, чтобы избежать циклической зависимости.
+        from app.core.settings_store import get_settings_store
+
+        store = get_settings_store()
+        return bool(await store.get_openrouter_api_key())
 
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -76,11 +87,11 @@ class OpenRouterClient:
             )
         return self._client
 
-    def _build_headers(self) -> dict[str, str]:
-        if not self._api_key:
+    def _build_headers(self, api_key: str) -> dict[str, str]:
+        if not api_key:
             raise OpenRouterAuthError("OPENROUTER_API_KEY is not set")
         return {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": self._site_url,
             "X-Title": self._app_name,
@@ -104,11 +115,15 @@ class OpenRouterClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
+        api_key_override: str | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Стриминговый chat/completions с парсингом SSE.
 
         Yield-ит StreamingChunk с дельтой контента. Аккуратно закрывает stream.
         При сетевых ошибках бросает OpenRouterError с человекочитаемым описанием.
+
+        ``api_key_override`` позволяет orchestrator-у подсунуть ключ из БД
+        (см. ``app.core.settings_store``) без перестройки клиента.
         """
         client = self._ensure_client()
         payload: dict[str, Any] = {
@@ -123,12 +138,13 @@ class OpenRouterClient:
         if extra:
             payload.update(extra)
 
+        api_key = api_key_override or self._api_key
         try:
             async with client.stream(
                 "POST",
                 "/chat/completions",
                 json=payload,
-                headers=self._build_headers(),
+                headers=self._build_headers(api_key),
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
@@ -194,6 +210,7 @@ class OpenRouterClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
+        api_key_override: str | None = None,
     ) -> CompletionResult:
         """Не-стриминговый chat/completions для моделей без supports_streaming."""
         client = self._ensure_client()
@@ -209,11 +226,12 @@ class OpenRouterClient:
         if extra:
             payload.update(extra)
 
+        api_key = api_key_override or self._api_key
         try:
             response = await client.post(
                 "/chat/completions",
                 json=payload,
-                headers=self._build_headers(),
+                headers=self._build_headers(api_key),
             )
         except httpx.HTTPError as exc:
             log.exception("OpenRouter network error")

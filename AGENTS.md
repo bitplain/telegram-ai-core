@@ -58,6 +58,33 @@
   `scripts/railway_diagnose.py`, который печатает безопасную сводку (без
   паролей) и валит старт с понятной инструкцией, если переменные не заданы.
 
+## Admin /settings и runtime-настройки
+
+- Команда `/settings` доступна только админам (`ADMIN_TELEGRAM_USER_IDS` —
+  CSV Telegram user-id). Фильтр — `app/bot/filters/admin.py`.
+- Состояние диалогов с ботом (FSM) — `MemoryStorage` в `Dispatcher`. Хватает,
+  пока бот однопроцессный; миграция на Redis-storage — следующим этапом.
+- `app/core/settings_store.py` — единая точка доступа к runtime-настройкам:
+  - `openrouter_api_key` (БД → ENV, Fernet-шифрование если задан
+    `SETTINGS_ENCRYPTION_KEY`),
+  - `model_override.<model_id>` (override OpenRouter slug-а для конкретного
+    `ModelProfile`).
+- Кеш настроек — Redis (`app_settings:v1:*`, TTL 60s). При недоступном Redis —
+  каждый вызов идёт в БД, без падений.
+- `app/llm/openrouter_models.py` — список моделей OpenRouter с кешем 12h
+  (`openrouter:models:v1`). Эндпоинт `/api/v1/models` публичный, без Authorization.
+- `Orchestrator.plan_async` применяет `model_override` поверх
+  `ModelRegistry.get(...)`. Sync `plan(...)` сохранён для совместимости.
+- API-ключ из БД подсасывается в `OpenRouterClient.stream_chat_completion(...)`
+  / `chat_completion(...)` через kwarg `api_key_override`. `_build_headers`
+  принимает API-ключ параметром, что упрощает override-логику.
+
+При добавлении новых runtime-настроек:
+
+- Класть их в `app_settings` (key/value/is_encrypted), не в новый ENV.
+- Проводить через `SettingsStore` (всегда async, всегда с инвалидацией Redis).
+- Не светить значения секретов в логах — только маскированный вид.
+
 ## MVP-ограничения, которые мы сознательно держим
 
 - Tools для агентов архитектурно заложены (`AgentProfile.allowed_tools`), но не реализованы.

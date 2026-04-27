@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.types import ReplyParameters
 
 from app.config import get_settings
 from app.utils.text_splitter import split_for_telegram
@@ -191,6 +192,16 @@ class TelegramStreamRenderer:
                 return
         await self._send_first_fallback(text_to_show)
 
+    def _build_reply_parameters(self) -> ReplyParameters | None:
+        """Собирает ReplyParameters, если задан reply_to_message_id.
+
+        В aiogram 3.26+ `send_message_draft` принимает только `reply_parameters`
+        и падает с TypeError на устаревший kwarg `reply_to_message_id`.
+        """
+        if self._reply_to_message_id is None:
+            return None
+        return ReplyParameters(message_id=self._reply_to_message_id)
+
     async def _try_send_draft(self, text: str) -> bool:
         """Пробуем sendMessageDraft. Возвращаем True при успехе."""
         send_draft = getattr(self._bot, "send_message_draft", None)
@@ -198,12 +209,16 @@ class TelegramStreamRenderer:
             log.info("aiogram has no send_message_draft — falling back to send_message")
             return False
 
+        reply_parameters = self._build_reply_parameters()
+        kwargs: dict[str, object] = {
+            "chat_id": self._chat_id,
+            "text": text,
+        }
+        if reply_parameters is not None:
+            kwargs["reply_parameters"] = reply_parameters
+
         try:
-            sent = await send_draft(
-                chat_id=self._chat_id,
-                text=text,
-                reply_to_message_id=self._reply_to_message_id,
-            )
+            sent = await send_draft(**kwargs)
         except TelegramRetryAfter as exc:
             await asyncio.sleep(min(exc.retry_after, 5))
             return False
@@ -211,6 +226,13 @@ class TelegramStreamRenderer:
             log.warning(
                 "send_message_draft failed (%s) — falling back to send_message",
                 exc.__class__.__name__,
+            )
+            return False
+        except Exception:  # noqa: BLE001
+            # Любая иная ошибка (TypeError на несовместимый kwarg, AttributeError
+            # на отсутствующий метод и т.д.) — деградируем в обычный send_message.
+            log.exception(
+                "send_message_draft raised unexpected exception; falling back to send_message"
             )
             return False
 
@@ -226,17 +248,27 @@ class TelegramStreamRenderer:
         return True
 
     async def _send_first_fallback(self, text: str) -> None:
+        reply_parameters = self._build_reply_parameters()
+        kwargs: dict[str, object] = {
+            "chat_id": self._chat_id,
+            "text": text,
+        }
+        if reply_parameters is not None:
+            kwargs["reply_parameters"] = reply_parameters
+
         try:
-            sent = await self._bot.send_message(
-                chat_id=self._chat_id,
-                text=text,
-                reply_to_message_id=self._reply_to_message_id,
-            )
+            sent = await self._bot.send_message(**kwargs)
         except TelegramRetryAfter as exc:
             await asyncio.sleep(min(exc.retry_after, 5))
             return
         except TelegramAPIError:
             log.exception("send_message failed for chat %s", self._chat_id)
+            return
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "send_message raised unexpected exception for chat %s",
+                self._chat_id,
+            )
             return
 
         self._current_message_id = sent.message_id
@@ -260,13 +292,16 @@ class TelegramStreamRenderer:
         except TelegramRetryAfter as exc:
             await asyncio.sleep(min(exc.retry_after, 5))
         except TelegramAPIError as exc:
-            # "message is not modified" — игнорируем; всё остальное — лог.
             msg = str(exc).lower()
             if "not modified" in msg:
                 self._last_edit_ts = time.monotonic()
                 return
             log.warning(
                 "edit_message_text failed (%s); continuing", exc.__class__.__name__
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "edit_message_text raised unexpected exception; continuing"
             )
 
     async def _send_tail(self, tail: str) -> None:
