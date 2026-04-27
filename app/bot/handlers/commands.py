@@ -303,7 +303,8 @@ async def cmd_debug(message: Message) -> None:
     if message.from_user is None or message.chat is None:
         return
     settings = get_settings()
-    if message.from_user.id not in settings.admin_telegram_user_ids:
+    admin_ids = settings.admin_telegram_user_ids
+    if not admin_ids or message.from_user.id not in admin_ids:
         await send_plain(
             message.bot,
             message.chat.id,
