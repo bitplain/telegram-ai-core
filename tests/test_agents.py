@@ -84,7 +84,7 @@ def test_first_stage_agent_profiles_match_expected_defaults() -> None:
     assert general.safety_level == "normal"
 
     assert crypto.allowed_model_ids == ["crypto_model", "default_balanced"]
-    assert crypto.skill_ids == ["crypto", "defi", "token"]
+    assert crypto.skill_ids == ["crypto", "defi", "token", "portfolio"]
     assert crypto.temperature == 0.3
     assert crypto.safety_level == "financial_cautious"
 

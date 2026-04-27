@@ -36,6 +36,13 @@ def test_command_routing_crypto() -> None:
     assert res.cleaned_text == "Что думаешь про ETH?"
 
 
+def test_command_routing_portfolio() -> None:
+    router = SkillRouter()
+    res = router.resolve(text="/portfolio", active_skill_id="chat")
+    assert res.skill.id == "portfolio"
+    assert res.matched_by == "command"
+
+
 def test_command_routing_news() -> None:
     router = SkillRouter()
     res = router.resolve(text="/news Что известно про Telegram?", active_skill_id="chat")

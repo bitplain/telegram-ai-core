@@ -45,6 +45,18 @@ ASK_SKILL = SkillProfile(
     enabled=True,
 )
 
+PORTFOLIO_SKILL = SkillProfile(
+    id="portfolio",
+    name="Портфель ETH",
+    description="Показать сохранённый в боте баланс ETH и оценку в USD.",
+    agent_id="crypto",
+    model_id="crypto_model",
+    temperature=0.2,
+    trigger_commands=["/portfolio", "/balance"],
+    trigger_keywords=["портфель", "баланс eth", "сколько eth"],
+    enabled=True,
+)
+
 CRYPTO_SKILL = SkillProfile(
     id="crypto",
     name="Криптоанализ",
@@ -54,6 +66,9 @@ CRYPTO_SKILL = SkillProfile(
     temperature=0.4,
     trigger_commands=["/crypto"],
     trigger_keywords=[
+        "рынок",
+        "рынке",
+        "крипторынок",
         "крипта",
         "крипто",
         "bitcoin",
@@ -180,6 +195,7 @@ ALL_SKILLS: list[SkillProfile] = [
     CHAT_SKILL,
     ASK_SKILL,
     FAST_SKILL,
+    PORTFOLIO_SKILL,
     CRYPTO_SKILL,
     DEFI_SKILL,
     TOKEN_SKILL,

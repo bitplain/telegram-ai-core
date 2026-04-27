@@ -107,6 +107,17 @@ class Settings(BaseSettings):
     # PORT — приоритетная переменная (Railway / Heroku / etc).
     PORT: int | None = None
 
+    # --- CryptoPanic (опционально; без ключа возможен публичный режим с лимитами) ---
+    CRYPTOPANIC_API_KEY: str = ""
+
+    # --- Фоновые задачи (polling): интервалы в секундах ---
+    ETH_ALERT_CHECK_INTERVAL_SECONDS: int = 300
+    DAILY_DIGEST_HOUR_UTC: int = 8
+    DAILY_DIGEST_POLL_INTERVAL_SECONDS: int = 900
+
+    # --- CoinGecko (публичный API, только чтение; ключ опционален на будущее) ---
+    COINGECKO_BASE_URL: str = "https://api.coingecko.com/api/v3"
+
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_MODE: TelegramMode = "polling"
