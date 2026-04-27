@@ -45,6 +45,12 @@ def test_enabled_set_includes_default() -> None:
     assert "general" in enabled_ids
 
 
+def test_agent_menu_enabled_contains_only_specialized_modes() -> None:
+    registry = get_agent_registry()
+    menu_ids = [a.id for a in registry.list_agent_menu_enabled()]
+    assert menu_ids == ["crypto", "news"]
+
+
 def test_allowed_models_are_consistent() -> None:
     registry = get_agent_registry()
     for agent in registry.list_enabled():

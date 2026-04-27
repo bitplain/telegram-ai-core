@@ -74,9 +74,19 @@ class ContextBuilder:
           и подставляем уже очищенный от команды текст.
         """
         repo = MessageRepository(self._session)
-        history = await repo.list_recent(
-            conversation_id=conversation.id, limit=agent.max_context_messages
-        )
+        active_mode = getattr(conversation, "active_mode", "default")
+        agent_id = agent.id if active_mode == "agent" else None
+        if agent_id is None:
+            history = await repo.list_recent(
+                conversation_id=conversation.id,
+                limit=agent.max_context_messages,
+            )
+        else:
+            history = await repo.list_recent_for_agent(
+                conversation_id=conversation.id,
+                agent_id=agent_id,
+                limit=agent.max_context_messages,
+            )
 
         system_prompt = system_prompt_override or agent.system_prompt
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]

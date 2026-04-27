@@ -25,4 +25,5 @@ DEVOPS_AGENT = AgentProfile(
     safety_level="standard",
     allowed_tools=[],
     enabled=True,
+    show_in_agent_menu=False,
 )

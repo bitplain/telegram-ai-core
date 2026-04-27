@@ -7,10 +7,10 @@ import logging
 from aiogram import F, Router
 from aiogram.types import Message
 
-from app.agents.registry import get_agent_registry
 from app.bot.renderers.telegram_stream_renderer import TelegramStreamRenderer
 from app.bot.renderers.telegram_text import send_plain
 from app.core.context_builder import ContextBuilder
+from app.core.agent_modes import resolve_message_route
 from app.core.idempotency import is_first_seen
 from app.core.orchestrator import Orchestrator
 from app.core.prompts import (
@@ -38,8 +38,6 @@ from app.llm.openrouter_client import (
     OpenRouterError,
     get_openrouter_client,
 )
-from app.skills.registry import get_skill_registry
-from app.skills.router import SkillResolution, SkillRouter
 
 log = logging.getLogger(__name__)
 
@@ -116,29 +114,22 @@ async def process_user_message(
             user_id=user.id, chat_id=chat.id
         )
         conversation_id = conversation.id
-        active_skill_id = conversation.active_skill_id
+        route = resolve_message_route(text=text, conversation=conversation)
 
-    # 4) Skill routing (по тексту + активному skill).
-    skill_router = SkillRouter()
-    resolution: SkillResolution = skill_router.resolve(
-        text=text, active_skill_id=active_skill_id
-    )
-    skill = resolution.skill
-    user_text = resolution.cleaned_text or text  # если команда без аргументов — оставим исходный текст
+    # 4) Routing: agent-mode не запускает keyword matching, default-mode живёт как раньше.
+    skill = route.skill
+    agent = route.agent
+    user_text = route.cleaned_text or text
 
-    # 5) Агент и план модели.
-    agent_registry = get_agent_registry()
-    agent = agent_registry.get(skill.agent_id)
-
-    # Если skill пришёл по команде — обновим conversation.active_*.
-    if resolution.matched_by == "command":
+    # Если skill пришёл по команде — обновим conversation.active_* в default-mode.
+    if route.matched_by == "command":
         async with session_scope() as session:
             conv_repo = ConversationRepository(session)
             await conv_repo.update_active_routing(
                 conversation_id=conversation_id,
                 agent_id=agent.id,
                 skill_id=skill.id,
-                model_id=skill.model_id or agent.default_model_id,
+                model_id=route.model_id,
             )
 
         # Если команда пришла без аргументов — просто переключаем и отвечаем.
@@ -154,7 +145,7 @@ async def process_user_message(
             )
             return
 
-    # 6) Если OpenRouter не настроен — отвечаем заглушкой.
+    # 5) Если OpenRouter не настроен — отвечаем заглушкой.
     # Учитываем как ENV, так и БД-override (admin /settings).
     or_client = get_openrouter_client()
     effective_api_key = await get_settings_store().get_openrouter_api_key()
@@ -162,7 +153,7 @@ async def process_user_message(
         await send_plain(message.bot, message.chat.id, OPENROUTER_NOT_CONFIGURED)
         return
 
-    # 7) Сохраняем inbound, готовим контекст, стартуем рендерер.
+    # 6) Сохраняем inbound, готовим контекст, стартуем рендерер.
     async with session_scope() as session:
         msg_repo = MessageRepository(session)
         await msg_repo.add(
@@ -171,6 +162,9 @@ async def process_user_message(
             text=user_text,
             telegram_message_id=message.message_id,
             message_type=MESSAGE_TYPE_TEXT,
+            agent_id=agent.id,
+            skill_id=skill.id,
+            model_id=route.model_id,
         )
 
     agent_settings_service = UserAgentSettingsService()
@@ -185,8 +179,11 @@ async def process_user_message(
         conversation = await conv_repo.get_or_create_active(
             user_id=user.id, chat_id=chat.id
         )
-        agent = await cb.resolve_agent(conversation)
+        await cb.resolve_agent(conversation)
         # План мог зависеть от другого агента — перестроим под актуальный.
+        route = resolve_message_route(text=user_text, conversation=conversation)
+        agent = route.agent
+        skill = route.skill
         effective_agent_settings = await agent_settings_service.get_effective_settings(
             telegram_user_id=message.from_user.id,
             agent_id=agent.id,
@@ -194,6 +191,7 @@ async def process_user_message(
         plan = await orchestrator.plan_async(
             agent=agent,
             skill=skill,
+            explicit_model_id=route.model_id,
             telegram_user_id=message.from_user.id,
         )
         if effective_agent_settings.custom_prompt_used:
@@ -210,7 +208,7 @@ async def process_user_message(
             system_prompt_override=effective_agent_settings.effective_prompt,
         )
 
-    # 8) Стартуем LLM-стрим и рендерим в Telegram.
+    # 7) Стартуем LLM-стрим и рендерим в Telegram.
     renderer = TelegramStreamRenderer(
         message.bot,
         chat_id=message.chat.id,
@@ -270,7 +268,7 @@ async def process_user_message(
         # пользователю по-прежнему отдаём дружелюбный LLM_GENERIC_ERROR.
         error_text_for_db = repr(exc)[:500]
 
-    # 9) Если стрим был пустой — отвечаем фолбэком.
+    # 8) Если стрим был пустой — отвечаем фолбэком.
     if not final_text and error_text is None:
         error_text = EMPTY_LLM_RESPONSE
 
@@ -293,7 +291,7 @@ async def process_user_message(
         )
         return
 
-    # 10) Успех: пишем outbound и помечаем llm_request успешным.
+    # 9) Успех: пишем outbound и помечаем llm_request успешным.
     async with session_scope() as session:
         msg_repo = MessageRepository(session)
         llm_repo = LLMRequestRepository(session)
@@ -303,6 +301,9 @@ async def process_user_message(
             text=final_text,
             telegram_message_id=None,
             message_type=MESSAGE_TYPE_TEXT,
+            agent_id=agent.id,
+            skill_id=skill.id,
+            model_id=plan.model.id,
         )
         await llm_repo.mark_success(request_id=request_id)
     log.info(
