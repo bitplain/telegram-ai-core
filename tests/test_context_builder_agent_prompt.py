@@ -7,7 +7,26 @@ from app.core.context_builder import ContextBuilder
 
 
 class _FakeMessageRepo:
+    def __init__(self) -> None:
+        self.list_recent_calls = []
+        self.list_recent_for_agent_calls = []
+
     async def list_recent(self, *, conversation_id, limit: int, agent_id=None):  # noqa: ANN001
+        self.list_recent_calls.append(
+            {"conversation_id": conversation_id, "limit": limit, "agent_id": agent_id}
+        )
+        return []
+
+    async def list_recent_for_agent(  # noqa: ANN001
+        self,
+        *,
+        conversation_id,
+        agent_id: str,
+        limit: int,
+    ):
+        self.list_recent_for_agent_calls.append(
+            {"conversation_id": conversation_id, "agent_id": agent_id, "limit": limit}
+        )
         return []
 
 
@@ -18,7 +37,8 @@ class _FakeConversation:
 async def test_context_builder_uses_custom_system_prompt(monkeypatch) -> None:
     import app.core.context_builder as module
 
-    monkeypatch.setattr(module, "MessageRepository", lambda session: _FakeMessageRepo())
+    repo = _FakeMessageRepo()
+    monkeypatch.setattr(module, "MessageRepository", lambda session: repo)
     builder = ContextBuilder(session=None)  # type: ignore[arg-type]
     agent = get_agent_registry().get("crypto")
 
@@ -30,3 +50,22 @@ async def test_context_builder_uses_custom_system_prompt(monkeypatch) -> None:
 
     assert messages[0] == {"role": "system", "content": "Пользовательский prompt"}
 
+
+async def test_context_builder_uses_explicit_agent_scoped_history(monkeypatch) -> None:
+    import app.core.context_builder as module
+
+    repo = _FakeMessageRepo()
+    monkeypatch.setattr(module, "MessageRepository", lambda session: repo)
+    builder = ContextBuilder(session=None)  # type: ignore[arg-type]
+    agent = get_agent_registry().get("crypto")
+
+    await builder.build_messages(
+        conversation=_FakeConversation(),  # type: ignore[arg-type]
+        agent=agent,
+        history_agent_id="crypto",
+    )
+
+    assert repo.list_recent_calls == []
+    assert repo.list_recent_for_agent_calls == [
+        {"conversation_id": "conv-1", "agent_id": "crypto", "limit": 20}
+    ]

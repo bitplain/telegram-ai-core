@@ -106,6 +106,7 @@ class Chat(Base):
 
 CONVERSATION_STATUS_ACTIVE = "ACTIVE"
 CONVERSATION_STATUS_CLOSED = "CLOSED"
+CONVERSATION_STATUS_ARCHIVED = "ARCHIVED"
 
 CONVERSATION_MODE_DEFAULT = "default"
 CONVERSATION_MODE_AGENT = "agent"
@@ -114,11 +115,12 @@ CONVERSATION_MODE_AGENT = "agent"
 class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_conversation_active_user_chat",
             "user_id",
             "chat_id",
-            "status",
-            name="uq_conversation_user_chat_status",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
         ),
     )
 

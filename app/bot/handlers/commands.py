@@ -36,6 +36,7 @@ from app.db.models import (
 )
 from app.db.repositories.chats import ChatRepository
 from app.db.repositories.conversations import ConversationRepository
+from app.db.repositories.llm_requests import LLMRequestRepository
 from app.db.repositories.messages import MessageRepository
 from app.db.repositories.users import UserRepository
 from app.db.session import session_scope
@@ -49,7 +50,16 @@ router = Router(name="commands")
 
 # Все команды-алиасы для skill-ов тоже регистрируем здесь, чтобы они не
 # попадали в общий messages-router как обычный текст.
-SKILL_COMMAND_ALIASES = ("chat", "fast", "crypto", "finance", "news", "devops", "infra")
+SKILL_COMMAND_ALIASES = (
+    "chat",
+    "fast",
+    "crypto",
+    "finance",
+    "news",
+    "devops",
+    "infra",
+)
+ASK_USAGE = "Использование:\n/ask crypto текст\n/ask news текст"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +95,23 @@ async def _ensure_conversation(message: Message):
         return conv
 
 
+def _activation_for_new_target(target: str, active) -> object:  # noqa: ANN001
+    """Выбирает routing state для /new."""
+    if target in {"", None}:  # type: ignore[comparison-overlap]
+        if getattr(active, "active_mode", AGENT_MODE_DEFAULT) == AGENT_MODE_AGENT:
+            agent_id = getattr(active, "active_agent_id", "")
+            try:
+                return build_agent_mode_activation(agent_id)
+            except ValueError:
+                return build_default_mode_activation()
+        return build_default_mode_activation()
+    if target == AGENT_MODE_DEFAULT:
+        return build_default_mode_activation()
+    if target in available_agent_mode_ids():
+        return build_agent_mode_activation(target)
+    raise ValueError(target)
+
+
 # ---------------------------------------------------------------------------
 # /start /help
 # ---------------------------------------------------------------------------
@@ -107,9 +134,10 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.message(Command("reset"))
-async def cmd_reset(message: Message) -> None:
+async def cmd_reset(message: Message, command: CommandObject) -> None:
     if message.from_user is None or message.chat is None:
         return
+    reset_all = (command.args or "").strip().lower() == "all"
 
     async with session_scope() as session:
         user_repo = UserRepository(session)
@@ -127,12 +155,81 @@ async def cmd_reset(message: Message) -> None:
             await send_plain(message.bot, message.chat.id, "Контекст уже пуст.")
             return
 
-        await conv_repo.reset(conversation_id=active.id)
+        if reset_all:
+            activation = build_default_mode_activation()
+            await conv_repo.archive_active_and_create(
+                user_id=user.id,
+                chat_id=chat.id,
+                active_mode=activation.active_mode,
+                active_agent_id=activation.active_agent_id,
+                active_skill_id=activation.active_skill_id,
+                active_model_id=activation.active_model_id,
+            )
+            text = "Диалог сброшен. Включён обычный режим."
+        else:
+            await conv_repo.archive_active_and_create(
+                user_id=user.id,
+                chat_id=chat.id,
+                active_mode=active.active_mode,
+                active_agent_id=active.active_agent_id,
+                active_skill_id=active.active_skill_id,
+                active_model_id=active.active_model_id,
+            )
+            text = "Диалог сброшен. Текущий режим сохранён."
+
+    await send_plain(message.bot, message.chat.id, text)
+
+
+@router.message(Command("new"))
+async def cmd_new(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+
+    target = (command.args or "").strip().lower()
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        chat_repo = ChatRepository(session)
+        conv_repo = ConversationRepository(session)
+
+        user = await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        chat = await chat_repo.upsert(
+            telegram_chat_id=message.chat.id,
+            chat_type=message.chat.type,
+            title=getattr(message.chat, "title", None),
+        )
+        active = await conv_repo.get_or_create_active(user_id=user.id, chat_id=chat.id)
+        try:
+            activation = _activation_for_new_target(target, active)
+        except ValueError:
+            await send_plain(
+                message.bot,
+                message.chat.id,
+                "Неизвестный режим. Использование: /new, /new default, /new crypto, /new news.",
+            )
+            return
+
+        await conv_repo.archive_active_and_create(
+            user_id=user.id,
+            chat_id=chat.id,
+            active_mode=activation.active_mode,
+            active_agent_id=activation.active_agent_id,
+            active_skill_id=activation.active_skill_id,
+            active_model_id=activation.active_model_id,
+        )
 
     await send_plain(
         message.bot,
         message.chat.id,
-        "Диалог сброшен. Следующее сообщение начнёт новый контекст.",
+        (
+            f"Создан новый диалог. Режим: <code>{escape_html(activation.active_mode)}</code>, "
+            f"агент: <b>{escape_html(activation.agent.name)}</b>."
+        ),
     )
 
 
@@ -165,17 +262,18 @@ async def cmd_status(message: Message) -> None:
     lines = [
         "<b>Статус</b>",
         "",
-        "App status: ok",
+        "App: ok",
         f"Telegram mode: <code>{escape_html(get_settings().TELEGRAM_MODE)}</code>",
-        f"Режим: <code>{escape_html(conv.active_mode)}</code>",
-        f"Активный агент: <b>{escape_html(agent.name)}</b>",
-        f"Active agent id: <code>{escape_html(agent.id)}</code>",
-        f"Навык: <code>{escape_html(skill.id)}</code>",
-        f"Модель: <code>{escape_html(model.id)}</code>",
+        f"Conversation mode: <code>{escape_html(conv.active_mode)}</code>",
+        f"Active agent: <code>{escape_html(agent.id)}</code> — <b>{escape_html(agent.name)}</b>",
+        f"Active skill: <code>{escape_html(skill.id)}</code>",
+        f"Active model: <code>{escape_html(model.id)}</code>",
         f"Provider: <code>{escape_html(model.provider)}</code>",
         f"Provider model: <code>{escape_html(model.model_name)}</code>",
         f"PostgreSQL: <b>{escape_html(pg_status)}</b>",
         f"Redis: <b>{escape_html(redis_status)}</b>",
+        f"Streaming: <b>{'enabled' if model.supports_streaming else 'disabled'}</b>",
+        f"Draft: <b>{'enabled' if get_settings().TELEGRAM_STREAM_DRAFT_ENABLED else 'disabled'}</b>",
     ]
 
     if message.from_user is not None:
@@ -197,6 +295,77 @@ async def cmd_status(message: Message) -> None:
                     f"Override активной модели: <code>{escape_html(override)}</code>"
                 )
 
+    await send_plain(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("debug"))
+async def cmd_debug(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    settings = get_settings()
+    if message.from_user.id not in settings.admin_telegram_user_ids:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Команда доступна только администратору.",
+        )
+        log.info(
+            "debug_access_denied",
+            extra={"telegram_user_id": message.from_user.id},
+        )
+        return
+
+    conv = await _ensure_conversation(message)
+    if conv is None:
+        return
+
+    pg_status = "unknown"
+    redis_status = "unknown"
+    try:
+        from app.api.diagnostics import _check_postgres, _check_redis
+
+        pg_info = await _check_postgres()
+        redis_info = await _check_redis()
+        pg_status = "ok" if pg_info.get("ok") else "error"
+        redis_status = "ok" if redis_info.get("ok") else "error"
+    except Exception:  # noqa: BLE001
+        log.exception("Failed to build dependency status for /debug")
+
+    model = get_model_registry().get(conv.active_model_id)
+    last_status = "none"
+    async with session_scope() as session:
+        llm_repo = LLMRequestRepository(session)
+        last = await llm_repo.get_last_for_conversation(conversation_id=conv.id)
+        if last is not None:
+            last_status = last.status
+
+    log.info(
+        "debug_command_used",
+        extra={
+            "telegram_user_id": message.from_user.id,
+            "telegram_chat_id": message.chat.id,
+            "conversation_id": str(conv.id),
+        },
+    )
+    lines = [
+        "<b>Debug</b>",
+        "",
+        f"telegram_user_id: <code>{message.from_user.id}</code>",
+        f"telegram_chat_id: <code>{message.chat.id}</code>",
+        f"chat_type: <code>{escape_html(message.chat.type)}</code>",
+        f"conversation_id: <code>{escape_html(str(conv.id))}</code>",
+        f"active_mode: <code>{escape_html(conv.active_mode)}</code>",
+        f"active_agent_id: <code>{escape_html(conv.active_agent_id)}</code>",
+        f"active_skill_id: <code>{escape_html(conv.active_skill_id)}</code>",
+        f"active_model_id: <code>{escape_html(conv.active_model_id)}</code>",
+        f"last_llm_request_status: <code>{escape_html(last_status)}</code>",
+        f"provider: <code>{escape_html(model.provider)}</code>",
+        f"provider_model_name: <code>{escape_html(model.model_name)}</code>",
+        f"Redis: <code>{escape_html(redis_status)}</code>",
+        f"PostgreSQL: <code>{escape_html(pg_status)}</code>",
+        f"app_env: <code>{escape_html(settings.APP_ENV)}</code>",
+        f"telegram_mode: <code>{escape_html(settings.TELEGRAM_MODE)}</code>",
+    ]
     await send_plain(message.bot, message.chat.id, "\n".join(lines))
 
 
@@ -254,14 +423,14 @@ async def cmd_agents(message: Message) -> None:
 
 def _agent_menu_keyboard(*, show_exit: bool) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="Криптовалютный аналитик", callback_data="agent:select:crypto")],
-        [InlineKeyboardButton(text="Новостной агент", callback_data="agent:select:news")],
+        [InlineKeyboardButton(text="₿ Криптовалютный аналитик", callback_data="agent:select:crypto")],
+        [InlineKeyboardButton(text="📰 Новостной агент", callback_data="agent:select:news")],
     ]
     if show_exit:
-        rows.append([InlineKeyboardButton(text="Выйти в обычный режим", callback_data="agent:exit")])
+        rows.append([InlineKeyboardButton(text="🚪 Выйти в обычный режим", callback_data="agent:exit")])
     rows.extend(
         [
-            [InlineKeyboardButton(text="Настройки агентов", callback_data="agent:settings")],
+            [InlineKeyboardButton(text="⚙️ Настройки агентов", callback_data="agent:settings")],
             [InlineKeyboardButton(text="Закрыть", callback_data="agent:close")],
         ]
     )
@@ -277,6 +446,10 @@ def _agent_menu_text(active_mode: str, active_agent_id: str) -> str:
         "",
         f"Текущий режим: <code>{escape_html(active_mode)}</code>",
         f"Активный агент: <b>{escape_html(active_agent.name)}</b>",
+        "",
+        "Выбери специализированного агента.",
+        "После выбора все следующие сообщения будут обрабатываться этим агентом.",
+        "Для выхода используй /exit.",
         "",
         "Доступные специализированные агенты:",
     ]
@@ -351,7 +524,10 @@ async def _activate_agent_mode_for_callback(callback: CallbackQuery, agent_id: s
             skill_id=activation.active_skill_id,
             model_id=activation.active_model_id,
         )
-    await callback.message.answer(_agent_enabled_text(activation.agent.name))
+    await callback.message.answer(
+        _agent_enabled_text(activation.agent.name),
+        reply_markup=_agent_active_keyboard(),
+    )
     await callback.answer("Режим включён")
 
 
@@ -360,6 +536,16 @@ def _agent_enabled_text(agent_name: str) -> str:
         f"Режим включён: {escape_html(agent_name)}.\n\n"
         "Теперь все сообщения будут обрабатываться этим агентом.\n\n"
         "Чтобы выйти, используй /exit."
+    )
+
+
+def _agent_active_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚙️ Настройки агента", callback_data="agent:settings")],
+            [InlineKeyboardButton(text="🚪 Выйти из режима", callback_data="agent:exit")],
+            [InlineKeyboardButton(text="🔄 Сменить агента", callback_data="agent:menu")],
+        ]
     )
 
 
@@ -398,6 +584,52 @@ async def cmd_exit(message: Message) -> None:
             f"Ты вышел из режима: {escape_html(previous_agent.name)}. "
             "Теперь отвечает универсальный ассистент."
         ),
+    )
+
+
+def _parse_ask_args(args: str) -> tuple[str | None, str]:
+    cleaned = (args or "").strip()
+    if not cleaned:
+        return None, ""
+    agent_id, _, question = cleaned.partition(" ")
+    return agent_id.lower(), question.strip()
+
+
+@router.message(Command("ask"))
+async def cmd_ask(message: Message, command: CommandObject) -> None:
+    agent_id, question = _parse_ask_args(command.args or "")
+    if not agent_id:
+        await send_plain(message.bot, message.chat.id, ASK_USAGE)
+        return
+    if agent_id not in available_agent_mode_ids():
+        ids = ", ".join(available_agent_mode_ids()) or "нет доступных спецагентов"
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            f"Такой агент не найден.\n\nДоступные агенты: <code>{escape_html(ids)}</code>.",
+        )
+        return
+    if not question:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Напиши вопрос после agent id.\n\n" + ASK_USAGE,
+        )
+        return
+
+    log.info(
+        "one_shot_ask_used",
+        extra={
+            "telegram_user_id": message.from_user.id if message.from_user else None,
+            "agent_id": agent_id,
+        },
+    )
+    from app.bot.handlers.messages import process_user_message
+
+    await process_user_message(
+        message,
+        override_text=question,
+        one_shot_agent_id=agent_id,
     )
 
 
@@ -463,7 +695,7 @@ async def cb_agent_settings(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "agent:close")
 async def cb_agent_close(callback: CallbackQuery) -> None:
     if isinstance(callback.message, Message):
-        await callback.message.edit_text("Закрыто.")
+        await callback.message.edit_text("Меню закрыто.")
     await callback.answer()
 
 

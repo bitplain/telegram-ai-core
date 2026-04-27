@@ -17,6 +17,12 @@ def test_get_default_fast() -> None:
     assert model.tier == "cheap"
 
 
+def test_crypto_and_news_models_exist() -> None:
+    registry = get_model_registry()
+    assert registry.get("crypto_model").id == "crypto_model"
+    assert registry.get("news_model").id == "news_model"
+
+
 def test_unknown_falls_back_to_default() -> None:
     registry = get_model_registry()
     model = registry.get("missing")
