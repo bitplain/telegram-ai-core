@@ -29,8 +29,16 @@ class _FakeSettingsService:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_applies_user_agent_model_override() -> None:
+async def test_orchestrator_applies_user_agent_model_override(monkeypatch) -> None:
+    import app.core.orchestrator as module
+
     from app.core.orchestrator import Orchestrator
+
+    class _NoDbSettingsStore:
+        async def get_model_override(self, model_id: str) -> None:
+            return None
+
+    monkeypatch.setattr(module, "get_settings_store", lambda: _NoDbSettingsStore())
 
     agent = get_agent_registry().get("general")
     skill = type("Skill", (), {"model_id": None, "temperature": None})()
@@ -43,4 +51,3 @@ async def test_orchestrator_applies_user_agent_model_override() -> None:
     )
 
     assert plan.model.id == "crypto_model"
-

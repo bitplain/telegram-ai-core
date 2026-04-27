@@ -23,6 +23,19 @@ def test_get_crypto() -> None:
     assert agent.id == "crypto"
 
 
+def test_get_news() -> None:
+    registry = get_agent_registry()
+    agent = registry.get("news")
+    assert agent.id == "news"
+
+
+def test_show_in_agent_menu_flags() -> None:
+    registry = get_agent_registry()
+    assert registry.get("general").show_in_agent_menu is False
+    assert registry.get("crypto").show_in_agent_menu is True
+    assert registry.get("news").show_in_agent_menu is True
+
+
 def test_unknown_falls_back_to_general() -> None:
     registry = get_agent_registry()
     agent = registry.get("does-not-exist")
@@ -56,6 +69,29 @@ def test_allowed_models_are_consistent() -> None:
     for agent in registry.list_enabled():
         if agent.allowed_model_ids:
             assert agent.default_model_id in agent.allowed_model_ids
+
+
+def test_first_stage_agent_profiles_match_expected_defaults() -> None:
+    registry = get_agent_registry()
+    general = registry.get("general")
+    crypto = registry.get("crypto")
+    news = registry.get("news")
+
+    assert general.default_model_id == "default_balanced"
+    assert general.allowed_model_ids == ["default_fast", "default_balanced"]
+    assert general.skill_ids == ["chat", "ask", "fast"]
+    assert general.temperature == 0.4
+    assert general.safety_level == "normal"
+
+    assert crypto.allowed_model_ids == ["crypto_model", "default_balanced"]
+    assert crypto.skill_ids == ["crypto", "defi", "token"]
+    assert crypto.temperature == 0.3
+    assert crypto.safety_level == "financial_cautious"
+
+    assert news.allowed_model_ids == ["news_model", "default_fast", "default_balanced"]
+    assert news.skill_ids == ["news", "summarize_news"]
+    assert news.temperature == 0.2
+    assert news.safety_level == "high_caution"
 
 
 def test_allowed_tools_is_empty_on_mvp() -> None:

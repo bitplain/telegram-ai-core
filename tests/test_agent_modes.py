@@ -30,8 +30,8 @@ def test_agent_menu_keyboard_does_not_show_general() -> None:
     button_text = [button.text for row in keyboard.inline_keyboard for button in row]
 
     assert "Универсальный ассистент" not in button_text
-    assert "Криптовалютный аналитик" in button_text
-    assert "Новостной агент" in button_text
+    assert any("Криптовалютный аналитик" in text for text in button_text)
+    assert any("Новостной агент" in text for text in button_text)
 
 
 def test_agent_callbacks_are_registered_once() -> None:

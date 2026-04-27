@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -80,3 +80,17 @@ class LLMRequestRepository:
             )
         )
         await self._session.execute(stmt)
+
+    async def get_last_for_conversation(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+    ) -> LLMRequest | None:
+        stmt = (
+            select(LLMRequest)
+            .where(LLMRequest.conversation_id == conversation_id)
+            .order_by(LLMRequest.created_at.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()

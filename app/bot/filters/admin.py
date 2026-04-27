@@ -1,4 +1,4 @@
-"""AdminFilter: пропускает только Telegram-пользователей из ADMIN_TELEGRAM_USER_IDS."""
+"""AdminFilter: пропускает только Telegram-пользователей из admin ids."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ class AdminFilter(BaseFilter):
     """True, если ``event.from_user.id`` входит в ``settings.admin_telegram_user_ids``.
 
     Используется для всех handler-ов команды ``/settings`` и её callback-ов.
-    Список администраторов берётся из ENV ``ADMIN_TELEGRAM_USER_IDS`` (CSV).
+    Список администраторов берётся из ENV ``ADMIN_TELEGRAM_IDS`` и legacy
+    ``ADMIN_TELEGRAM_USER_IDS``.
     """
 
     async def __call__(self, event: Message | CallbackQuery) -> bool:

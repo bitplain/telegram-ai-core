@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
-
-SafetyLevel = Literal["low", "standard", "high"]
 
 
 class AgentProfile(BaseModel):
@@ -26,7 +22,7 @@ class AgentProfile(BaseModel):
     skill_ids: list[str] = Field(default_factory=list)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_context_messages: int = Field(default=20, ge=1, le=200)
-    safety_level: SafetyLevel = "standard"
+    safety_level: str = "standard"
     allowed_tools: list[str] = Field(default_factory=list)
     enabled: bool = True
     show_in_agent_menu: bool = True

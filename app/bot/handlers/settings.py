@@ -76,7 +76,7 @@ async def _answer_settings_access_denied(message: Message) -> None:
     await message.answer(
         "Команда /settings доступна только администраторам.\n"
         "Проверьте, что ваш Telegram user id добавлен в "
-        "<code>ADMIN_TELEGRAM_USER_IDS</code>."
+        "<code>ADMIN_TELEGRAM_IDS</code>."
     )
 
 

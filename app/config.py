@@ -27,6 +27,7 @@ class ConfigError(RuntimeError):
 
 AppEnv = Literal["local", "railway", "production"]
 TelegramMode = Literal["polling", "webhook"]
+BotAccessMode = Literal["public", "allowlist", "admin_only"]
 
 
 # Префикс asyncpg-драйвера для SQLAlchemy.
@@ -124,6 +125,8 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: int = 120
     RATE_LIMIT_MESSAGES: int = 30
     RATE_LIMIT_WINDOW_SECONDS: int = 3600
+    DAILY_USER_MESSAGE_LIMIT: int = 0
+    MONTHLY_GLOBAL_MESSAGE_LIMIT: int = 0
     AGENT_PROMPT_MAX_LENGTH: int = 8000
 
     # --- Database (полный набор поддерживаемых источников) ---
@@ -161,7 +164,12 @@ class Settings(BaseSettings):
     DIAGNOSTICS_TOKEN: str = ""
 
     # --- Admin / runtime settings (BD-overrides управляются через бот) ---
-    # CSV списка Telegram user-id, которым разрешена команда /settings.
+    BOT_ACCESS_MODE: BotAccessMode = "public"
+    ALLOWED_TELEGRAM_USER_IDS_RAW: str = Field(
+        "", alias="ALLOWED_TELEGRAM_USER_IDS"
+    )
+    ADMIN_TELEGRAM_IDS_RAW: str = Field("", alias="ADMIN_TELEGRAM_IDS")
+    # Legacy alias: старое имя продолжает работать для /settings и admin-only.
     ADMIN_TELEGRAM_USER_IDS_RAW: str = Field("", alias="ADMIN_TELEGRAM_USER_IDS")
     # Опциональный Fernet-ключ для шифрования секретов в таблице app_settings.
     # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -329,12 +337,32 @@ class Settings(BaseSettings):
     # --- Admin ---
 
     @property
+    def allowed_telegram_user_ids(self) -> list[int]:
+        """Парсит ALLOWED_TELEGRAM_USER_IDS (CSV) в список int."""
+        return self._parse_csv_ints(self.ALLOWED_TELEGRAM_USER_IDS_RAW)
+
+    @property
     def admin_telegram_user_ids(self) -> list[int]:
-        """Парсит ADMIN_TELEGRAM_USER_IDS_RAW (CSV) в список int.
+        """Парсит ADMIN_TELEGRAM_IDS и legacy ADMIN_TELEGRAM_USER_IDS.
 
         Невалидные значения молча пропускаются. Пустая строка — пустой список.
         """
-        raw = (self.ADMIN_TELEGRAM_USER_IDS_RAW or "").strip()
+        merged = [
+            *self._parse_csv_ints(self.ADMIN_TELEGRAM_IDS_RAW),
+            *self._parse_csv_ints(self.ADMIN_TELEGRAM_USER_IDS_RAW),
+        ]
+        out: list[int] = []
+        seen: set[int] = set()
+        for item in merged:
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        return out
+
+    @staticmethod
+    def _parse_csv_ints(raw_value: str | None) -> list[int]:
+        raw = (raw_value or "").strip()
         if not raw:
             return []
         out: list[int] = []

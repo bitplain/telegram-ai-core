@@ -10,7 +10,7 @@ from aiogram.types import Message
 from app.bot.renderers.telegram_stream_renderer import TelegramStreamRenderer
 from app.bot.renderers.telegram_text import send_plain
 from app.core.context_builder import ContextBuilder
-from app.core.agent_modes import resolve_message_route
+from app.core.agent_modes import resolve_runtime_context
 from app.core.idempotency import is_first_seen
 from app.core.orchestrator import Orchestrator
 from app.core.prompts import (
@@ -20,6 +20,7 @@ from app.core.prompts import (
     RATE_LIMIT_MESSAGE,
 )
 from app.core.rate_limit import RateLimiter
+from app.core.usage_limits import UsageLimiter
 from app.core.services.user_agent_settings import UserAgentSettingsService
 from app.core.settings_store import get_settings_store
 from app.db.models import (
@@ -48,6 +49,7 @@ async def process_user_message(
     message: Message,
     *,
     override_text: str | None = None,
+    one_shot_agent_id: str | None = None,
 ) -> None:
     """Главный pipeline обработки сообщения.
 
@@ -92,7 +94,25 @@ async def process_user_message(
         await send_plain(message.bot, message.chat.id, RATE_LIMIT_MESSAGE)
         return
 
-    # 3) Upsert user/chat/conversation.
+    usage_decision = await UsageLimiter().check_and_increment(
+        telegram_user_id=message.from_user.id
+    )
+    if not usage_decision.allowed:
+        log.info(
+            "usage_limit_exceeded",
+            extra={
+                "telegram_user_id": message.from_user.id,
+                "reason": usage_decision.reason,
+            },
+        )
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Лимит сообщений временно исчерпан. Попробуй позже.",
+        )
+        return
+
+    # 3) Upsert user/chat/conversation и один раз решаем runtime context.
     async with session_scope() as session:
         user_repo = UserRepository(session)
         chat_repo = ChatRepository(session)
@@ -114,22 +134,33 @@ async def process_user_message(
             user_id=user.id, chat_id=chat.id
         )
         conversation_id = conversation.id
-        route = resolve_message_route(text=text, conversation=conversation)
+        user_id = user.id
+        chat_id = chat.id
+        runtime_context = resolve_runtime_context(
+            conversation=conversation,
+            message_text=text,
+            one_shot_agent_id=one_shot_agent_id,
+        )
+        if runtime_context.conversation_patch:
+            await conv_repo.update_active_routing(
+                conversation_id=conversation_id,
+                **runtime_context.conversation_patch,
+            )
 
     # 4) Routing: agent-mode не запускает keyword matching, default-mode живёт как раньше.
-    skill = route.skill
-    agent = route.agent
-    user_text = route.cleaned_text or text
+    skill = runtime_context.skill_profile
+    agent = runtime_context.agent_profile
+    user_text = runtime_context.cleaned_text or text
 
     # Если skill пришёл по команде — обновим conversation.active_* в default-mode.
-    if route.matched_by == "command":
+    if runtime_context.matched_by == "command":
         async with session_scope() as session:
             conv_repo = ConversationRepository(session)
             await conv_repo.update_active_routing(
                 conversation_id=conversation_id,
                 agent_id=agent.id,
                 skill_id=skill.id,
-                model_id=route.model_id,
+                model_id=runtime_context.model_id,
             )
 
         # Если команда пришла без аргументов — просто переключаем и отвечаем.
@@ -153,7 +184,31 @@ async def process_user_message(
         await send_plain(message.bot, message.chat.id, OPENROUTER_NOT_CONFIGURED)
         return
 
-    # 6) Сохраняем inbound, готовим контекст, стартуем рендерер.
+    # 6) Готовим plan, сохраняем inbound с фактическим model_id и собираем context.
+    agent_settings_service = UserAgentSettingsService()
+    orchestrator = Orchestrator(
+        client=or_client,
+        agent_settings_service=agent_settings_service,
+    )
+    effective_agent_settings = await agent_settings_service.get_effective_settings(
+        telegram_user_id=message.from_user.id,
+        agent_id=agent.id,
+    )
+    plan = await orchestrator.plan_async(
+        agent=agent,
+        skill=skill,
+        explicit_model_id=runtime_context.model_id,
+        telegram_user_id=message.from_user.id,
+    )
+    if effective_agent_settings.custom_prompt_used:
+        log.info(
+            "Using custom agent prompt",
+            extra={
+                "telegram_user_id": message.from_user.id,
+                "agent_id": agent.id,
+            },
+        )
+
     async with session_scope() as session:
         msg_repo = MessageRepository(session)
         await msg_repo.add(
@@ -164,47 +219,20 @@ async def process_user_message(
             message_type=MESSAGE_TYPE_TEXT,
             agent_id=agent.id,
             skill_id=skill.id,
-            model_id=route.model_id,
+            model_id=plan.model.id,
         )
 
-    agent_settings_service = UserAgentSettingsService()
-    orchestrator = Orchestrator(
-        client=or_client,
-        agent_settings_service=agent_settings_service,
-    )
     async with session_scope() as session:
         cb = ContextBuilder(session)
-        # Перечитаем conversation, чтобы получить свежее состояние active_*.
         conv_repo = ConversationRepository(session)
         conversation = await conv_repo.get_or_create_active(
-            user_id=user.id, chat_id=chat.id
+            user_id=user_id, chat_id=chat_id
         )
         await cb.resolve_agent(conversation)
-        # План мог зависеть от другого агента — перестроим под актуальный.
-        route = resolve_message_route(text=user_text, conversation=conversation)
-        agent = route.agent
-        skill = route.skill
-        effective_agent_settings = await agent_settings_service.get_effective_settings(
-            telegram_user_id=message.from_user.id,
-            agent_id=agent.id,
-        )
-        plan = await orchestrator.plan_async(
-            agent=agent,
-            skill=skill,
-            explicit_model_id=route.model_id,
-            telegram_user_id=message.from_user.id,
-        )
-        if effective_agent_settings.custom_prompt_used:
-            log.info(
-                "Using custom agent prompt",
-                extra={
-                    "telegram_user_id": message.from_user.id,
-                    "agent_id": agent.id,
-                },
-            )
         messages_payload = await cb.build_messages(
             conversation=conversation,
             agent=agent,
+            history_agent_id=agent.id,
             system_prompt_override=effective_agent_settings.effective_prompt,
         )
 

@@ -33,6 +33,18 @@ FAST_SKILL = SkillProfile(
     enabled=True,
 )
 
+ASK_SKILL = SkillProfile(
+    id="ask",
+    name="Одноразовый вопрос агенту",
+    description="Внутренний навык для /ask без смены активного режима.",
+    agent_id="general",
+    model_id="default_balanced",
+    temperature=0.4,
+    trigger_commands=["/ask"],
+    trigger_keywords=[],
+    enabled=True,
+)
+
 CRYPTO_SKILL = SkillProfile(
     id="crypto",
     name="Криптоанализ",
@@ -57,6 +69,30 @@ CRYPTO_SKILL = SkillProfile(
         "токен",
         "альткоин",
     ],
+    enabled=True,
+)
+
+DEFI_SKILL = SkillProfile(
+    id="defi",
+    name="DeFi",
+    description="Разбор DeFi-протоколов, доходностей, TVL и рисков.",
+    agent_id="crypto",
+    model_id="crypto_model",
+    temperature=0.3,
+    trigger_commands=["/defi"],
+    trigger_keywords=["defi", "tvl", "apy", "yield", "ликвидность"],
+    enabled=True,
+)
+
+TOKEN_SKILL = SkillProfile(
+    id="token",
+    name="Token analysis",
+    description="Разбор токенов, токеномики и рыночных рисков.",
+    agent_id="crypto",
+    model_id="crypto_model",
+    temperature=0.3,
+    trigger_commands=["/token"],
+    trigger_keywords=["tokenomics", "токеномика"],
     enabled=True,
 )
 
@@ -99,6 +135,18 @@ NEWS_SKILL = SkillProfile(
     enabled=True,
 )
 
+SUMMARIZE_NEWS_SKILL = SkillProfile(
+    id="summarize_news",
+    name="Краткая новостная сводка",
+    description="Сжатое изложение новостного текста или события.",
+    agent_id="news",
+    model_id="news_model",
+    temperature=0.2,
+    trigger_commands=["/summarize_news"],
+    trigger_keywords=["кратко новости", "сводка новостей"],
+    enabled=True,
+)
+
 DEVOPS_SKILL = SkillProfile(
     id="devops",
     name="DevOps / Infra",
@@ -130,10 +178,14 @@ DEVOPS_SKILL = SkillProfile(
 
 ALL_SKILLS: list[SkillProfile] = [
     CHAT_SKILL,
+    ASK_SKILL,
     FAST_SKILL,
     CRYPTO_SKILL,
+    DEFI_SKILL,
+    TOKEN_SKILL,
     FINANCE_SKILL,
     NEWS_SKILL,
+    SUMMARIZE_NEWS_SKILL,
     DEVOPS_SKILL,
 ]
 

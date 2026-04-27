@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -75,11 +75,14 @@ class MessageRepository:
         """Возвращает последние N сообщений текущего агента в хронологическом порядке."""
         if limit <= 0:
             return []
+        agent_condition = Message.agent_id == agent_id
+        if agent_id == "general":
+            agent_condition = or_(Message.agent_id == agent_id, Message.agent_id.is_(None))
         stmt = (
             select(Message)
             .where(
                 Message.conversation_id == conversation_id,
-                Message.agent_id == agent_id,
+                agent_condition,
             )
             .order_by(Message.created_at.desc())
             .limit(limit)

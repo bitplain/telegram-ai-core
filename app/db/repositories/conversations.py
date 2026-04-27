@@ -9,6 +9,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
+    CONVERSATION_MODE_AGENT,
+    CONVERSATION_MODE_DEFAULT,
+    CONVERSATION_STATUS_ARCHIVED,
     CONVERSATION_STATUS_ACTIVE,
     CONVERSATION_STATUS_CLOSED,
     Conversation,
@@ -107,3 +110,54 @@ class ConversationRepository:
             )
         )
         await self._session.execute(stmt)
+
+    async def archive_active_and_create(
+        self,
+        *,
+        user_id: uuid.UUID,
+        chat_id: uuid.UUID,
+        active_mode: str,
+        active_agent_id: str,
+        active_skill_id: str,
+        active_model_id: str,
+    ) -> Conversation:
+        """Архивирует текущую ACTIVE conversation и создаёт новую ACTIVE."""
+        now = datetime.now(timezone.utc)
+        await self._session.execute(
+            update(Conversation)
+            .where(
+                Conversation.user_id == user_id,
+                Conversation.chat_id == chat_id,
+                Conversation.status == CONVERSATION_STATUS_ACTIVE,
+            )
+            .values(status=CONVERSATION_STATUS_ARCHIVED, updated_at=now)
+        )
+        conversation = Conversation(
+            user_id=user_id,
+            chat_id=chat_id,
+            status=CONVERSATION_STATUS_ACTIVE,
+            active_mode=active_mode,
+            active_agent_id=active_agent_id,
+            active_skill_id=active_skill_id,
+            active_model_id=active_model_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(conversation)
+        await self._session.flush()
+        return conversation
+
+    async def reset_to_default(
+        self,
+        *,
+        user_id: uuid.UUID,
+        chat_id: uuid.UUID,
+    ) -> Conversation:
+        return await self.archive_active_and_create(
+            user_id=user_id,
+            chat_id=chat_id,
+            active_mode=CONVERSATION_MODE_DEFAULT,
+            active_agent_id="general",
+            active_skill_id="chat",
+            active_model_id="default_balanced",
+        )
