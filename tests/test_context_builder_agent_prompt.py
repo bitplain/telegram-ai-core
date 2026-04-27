@@ -7,7 +7,7 @@ from app.core.context_builder import ContextBuilder
 
 
 class _FakeMessageRepo:
-    async def list_recent(self, *, conversation_id, limit: int):  # noqa: ANN001
+    async def list_recent(self, *, conversation_id, limit: int, agent_id=None):  # noqa: ANN001
         return []
 
 
