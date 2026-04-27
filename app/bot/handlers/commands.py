@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -14,6 +16,10 @@ from app.agents.registry import get_agent_registry
 from app.bot.renderers.telegram_text import escape_html, send_long_html, send_plain
 from app.api.health import ready
 from app.config import get_settings
+from app.core.security.sensitive_input_guard import (
+    SENSITIVE_INPUT_BLOCKED_MESSAGE,
+    is_sensitive_user_text,
+)
 from app.core.agent_modes import (
     AGENT_MODE_AGENT,
     AGENT_MODE_DEFAULT,
@@ -31,13 +37,17 @@ from app.core.prompts import (
 )
 from app.core.settings_store import get_settings_store
 from app.db.models import (
+    MEMORY_SCOPE_AGENT,
+    MEMORY_SCOPE_GLOBAL,
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
 )
 from app.db.repositories.chats import ChatRepository
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.llm_requests import LLMRequestRepository
+from app.db.repositories.memories import MemoryRepository
 from app.db.repositories.messages import MessageRepository
+from app.db.repositories.portfolio import PortfolioRepository
 from app.db.repositories.users import UserRepository
 from app.db.session import session_scope
 from app.redis.client import ping as redis_ping
@@ -280,14 +290,8 @@ async def cmd_status(message: Message) -> None:
         admin_ids = get_settings().admin_telegram_user_ids
         if message.from_user.id in admin_ids:
             store = get_settings_store()
-            api_key = await store.get_openrouter_api_key()
-            has_db_key = await store.has_db_openrouter_api_key()
-            if api_key and has_db_key:
-                source = "db"
-            elif api_key:
-                source = "env"
-            else:
-                source = "не задан"
+            api_key = (get_settings().OPENROUTER_API_KEY or "").strip()
+            source = "env" if api_key else "не задан"
             lines.append(f"OpenRouter API key: <b>{escape_html(source)}</b>")
             override = await store.get_model_override(model.id)
             if override:
@@ -853,6 +857,264 @@ async def cmd_model(message: Message, command: CommandObject) -> None:
         message.bot,
         message.chat.id,
         f"Активная модель изменена: <b>{escape_html(model.display_name)}</b>.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /remember /memory /forget_memory
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("remember_agent"))
+async def cmd_remember_agent(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    text = (command.args or "").strip()
+    if not text:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование: /remember_agent текст (для текущего агента)",
+        )
+        return
+    if is_sensitive_user_text(text):
+        log.info(
+            "sensitive_input_blocked_remember_agent",
+            extra={"telegram_user_id": message.from_user.id},
+        )
+        await send_plain(message.bot, message.chat.id, SENSITIVE_INPUT_BLOCKED_MESSAGE)
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        chat_repo = ChatRepository(session)
+        conv_repo = ConversationRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Сначала отправь /start.")
+            return
+        chat = await chat_repo.get_by_telegram_id(message.chat.id)
+        if chat is None:
+            await send_plain(message.bot, message.chat.id, "Сначала отправь /start.")
+            return
+        conv = await conv_repo.get_active(user_id=user.id, chat_id=chat.id)
+        agent_id = conv.active_agent_id if conv else "general"
+        mem_repo = MemoryRepository(session)
+        row = await mem_repo.create_memory(
+            user_id=user.id,
+            content=text,
+            scope=MEMORY_SCOPE_AGENT,
+            agent_id=agent_id,
+        )
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Сохранено для агента <code>{escape_html(agent_id)}</code>. "
+        f"ID: <code>{escape_html(str(row.id))}</code>",
+    )
+
+
+@router.message(Command("remember"))
+async def cmd_remember(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    text = (command.args or "").strip()
+    if not text:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование: /remember текст заметки",
+        )
+        return
+    if is_sensitive_user_text(text):
+        log.info(
+            "sensitive_input_blocked_remember",
+            extra={"telegram_user_id": message.from_user.id},
+        )
+        await send_plain(message.bot, message.chat.id, SENSITIVE_INPUT_BLOCKED_MESSAGE)
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Сначала отправь /start.")
+            return
+        mem_repo = MemoryRepository(session)
+        row = await mem_repo.create_memory(
+            user_id=user.id,
+            content=text,
+            scope=MEMORY_SCOPE_GLOBAL,
+        )
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Сохранено. ID: <code>{escape_html(str(row.id))}</code>",
+    )
+
+
+@router.message(Command("memory"))
+async def cmd_memory(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        chat_repo = ChatRepository(session)
+        conv_repo = ConversationRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Пока нет данных пользователя. Отправь /start.")
+            return
+        chat = await chat_repo.get_by_telegram_id(message.chat.id)
+        if chat is None:
+            await send_plain(message.bot, message.chat.id, "Нет активного чата.")
+            return
+        conv = await conv_repo.get_active(user_id=user.id, chat_id=chat.id)
+        agent_id = conv.active_agent_id if conv else "general"
+        mem_repo = MemoryRepository(session)
+        global_rows = await mem_repo.list_global_memories(user_id=user.id)
+        agent_rows = await mem_repo.list_agent_memories(
+            user_id=user.id, agent_id=agent_id
+        )
+    lines = ["<b>Заметки</b>", ""]
+    lines.append("<b>Глобальные</b> (для всех агентов):")
+    if not global_rows:
+        lines.append("— пусто")
+    else:
+        for m in global_rows:
+            lines.append(
+                f"• <code>{escape_html(str(m.id))}</code>: {escape_html(m.preview())}"
+            )
+    lines.append("")
+    lines.append(f"<b>Для текущего агента</b> <code>{escape_html(agent_id)}</code>:")
+    if not agent_rows:
+        lines.append("— пусто")
+    else:
+        for m in agent_rows:
+            lines.append(
+                f"• <code>{escape_html(str(m.id))}</code>: {escape_html(m.preview())}"
+            )
+    await send_long_html(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("forget_memory"))
+async def cmd_forget_memory(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    raw = (command.args or "").strip()
+    if not raw:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование: /forget_memory &lt;uuid&gt;",
+        )
+        return
+    try:
+        memory_id = uuid.UUID(raw)
+    except ValueError:
+        await send_plain(message.bot, message.chat.id, "Некорректный UUID.")
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Пользователь не найден.")
+            return
+        mem_repo = MemoryRepository(session)
+        deleted = await mem_repo.delete_memory(memory_id=memory_id, user_id=user.id)
+    if deleted:
+        await send_plain(message.bot, message.chat.id, "Заметка удалена.")
+    else:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Заметка не найдена или не принадлежит тебе.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# /portfolio /portfolio_add_eth
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("portfolio"))
+async def cmd_portfolio(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Портфель пуст. Добавь позицию: /portfolio_add_eth …")
+            return
+        port_repo = PortfolioRepository(session)
+        assets = await port_repo.get_assets(user_id=user.id)
+    if not assets:
+        await send_plain(message.bot, message.chat.id, "Портфель пуст.")
+        return
+    lines: list[str] = ["<b>Портфель</b>", ""]
+    total_eth = Decimal(0)
+    for a in assets:
+        sym = escape_html(a.symbol)
+        net = escape_html(a.network)
+        amt = escape_html(str(a.amount))
+        avg = escape_html(str(a.average_buy_price))
+        lines.append(f"• {sym} @ {net}: <b>{amt}</b>, средняя цена покупки: {avg}")
+        if a.symbol.upper() == "ETH":
+            total_eth += Decimal(str(a.amount))
+    lines.append("")
+    lines.append(f"<b>Всего ETH</b>: {escape_html(format(total_eth, 'f'))}")
+    await send_long_html(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("portfolio_add_eth"))
+async def cmd_portfolio_add_eth(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 3:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование: /portfolio_add_eth &lt;amount&gt; &lt;price&gt; &lt;network&gt;\n"
+            "Пример: /portfolio_add_eth 0.25 3200 arbitrum",
+        )
+        return
+    amount_s, price_s, network = parts[0], parts[1], parts[2].strip().lower()
+    try:
+        amount = Decimal(amount_s)
+        price = Decimal(price_s)
+    except InvalidOperation:
+        await send_plain(message.bot, message.chat.id, "Некорректные числа amount или price.")
+        return
+    if amount <= 0 or price <= 0:
+        await send_plain(message.bot, message.chat.id, "amount и price должны быть положительными.")
+        return
+    if not network:
+        await send_plain(message.bot, message.chat.id, "Укажи network (например arbitrum).")
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        port_repo = PortfolioRepository(session)
+        row = await port_repo.add_eth_purchase(
+            user_id=user.id,
+            amount=amount,
+            price=price,
+            network=network,
+        )
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        (
+            f"ETH на <b>{escape_html(network)}</b> обновлён.\n"
+            f"Количество: <b>{escape_html(str(row.amount))}</b>\n"
+            f"Средняя цена покупки: <b>{escape_html(str(row.average_buy_price))}</b>"
+        ),
     )
 
 

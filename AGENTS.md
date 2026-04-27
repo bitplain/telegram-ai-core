@@ -13,6 +13,8 @@
 
 - **Не хардкодить секреты** в коде. Все ключи и пароли — только через переменные окружения.
 - **Не коммитить `.env`** (он в `.gitignore`). Менять только `.env.example`.
+- **Провайдерские API keys (OpenRouter и др.) в БД не хранятся** — только `OPENROUTER_API_KEY` и аналоги в ENV.
+- **Не сохранять** в `messages` и не отправлять в LLM seed-фразы, mnemonic, приватные ключи: перед записью в БД и до LLM срабатывает `app/core/security/sensitive_input_guard.py`.
 - Не логировать значения `*token*`, `*key*`, `*password*`, `*secret*` — фильтр в `app/logging_config.py` маскирует их автоматически, но и в коде не передавайте такие значения в `extra={...}`.
 - Маскировать пароль в `DATABASE_URL` / `REDIS_URL` перед логированием.
 
@@ -64,29 +66,30 @@
   CSV Telegram user-id). Фильтр — `app/bot/filters/admin.py`.
 - Состояние диалогов с ботом (FSM) — `MemoryStorage` в `Dispatcher`. Хватает,
   пока бот однопроцессный; миграция на Redis-storage — следующим этапом.
-- `app/core/settings_store.py` — единая точка доступа к runtime-настройкам:
-  - `openrouter_api_key` (БД → ENV, Fernet-шифрование если задан
-    `SETTINGS_ENCRYPTION_KEY`),
+- `app/core/settings_store.py` — async-доступ к runtime-настройкам в `app_settings`:
   - `model_override.<model_id>` (override OpenRouter slug-а для конкретного
-    `ModelProfile`).
+    `ModelProfile`),
+  - избранные модели OpenRouter, Yandex API key (заглушка) и т.п.
 - Кеш настроек — Redis (`app_settings:v1:*`, TTL 60s). При недоступном Redis —
   каждый вызов идёт в БД, без падений.
 - `app/llm/openrouter_models.py` — список моделей OpenRouter с кешем 12h
   (`openrouter:models:v1`). Эндпоинт `/api/v1/models` публичный, без Authorization.
 - `Orchestrator.plan_async` применяет `model_override` поверх
   `ModelRegistry.get(...)`. Sync `plan(...)` сохранён для совместимости.
-- API-ключ из БД подсасывается в `OpenRouterClient.stream_chat_completion(...)`
-  / `chat_completion(...)` через kwarg `api_key_override`. `_build_headers`
-  принимает API-ключ параметром, что упрощает override-логику.
+- **OpenRouter API key** читается только из `get_settings().OPENROUTER_API_KEY` (ENV);
+  `Orchestrator.run` не обращается к `SettingsStore` за ключом.
+- `_build_headers` в `OpenRouterClient` принимает ключ параметром; orchestrator
+  передаёт ключ из ENV.
 
 При добавлении новых runtime-настроек:
 
-- Класть их в `app_settings` (key/value/is_encrypted), не в новый ENV.
+- Класть их в `app_settings` (key/value/is_encrypted), не в новый ENV — **кроме**
+  секретов провайдеров (они только ENV).
 - Проводить через `SettingsStore` (всегда async, всегда с инвалидацией Redis).
 - Не светить значения секретов в логах — только маскированный вид.
 
 ## MVP-ограничения, которые мы сознательно держим
 
 - Tools для агентов архитектурно заложены (`AgentProfile.allowed_tools`), но не реализованы.
-- Нет pgvector / RAG / managed bots / долговременной memory.
-- Webhook-маршрут есть, но MVP проверяется через polling.
+- Нет pgvector / RAG / managed bots.
+- Webhook и polling поддерживаются; локально чаще проверяют polling.

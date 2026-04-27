@@ -62,6 +62,7 @@ class ContextBuilder:
         history_agent_id: str | None = None,
         system_prompt_override: str | None = None,
         extra_user_text: str | None = None,
+        memory_context: str | None = None,
     ) -> list[dict[str, str]]:
         """Возвращает список сообщений {role, content} для chat completions.
 
@@ -88,6 +89,9 @@ class ContextBuilder:
             )
 
         system_prompt = system_prompt_override or agent.system_prompt
+        memory_block = (memory_context or "").strip()
+        if memory_block:
+            system_prompt = f"{system_prompt}\n\n{memory_block}"
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
         for msg in history:

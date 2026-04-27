@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-import httpx
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
@@ -30,13 +29,10 @@ log = logging.getLogger(__name__)
 settings_router = Router(name="settings")
 
 _PAGE_SIZE = 8
-_API_KEY_PREFIX = "sk-or-v1-"
-_VALIDATE_URL = "https://openrouter.ai/api/v1/key"
 _PROMPT_PREVIEW_CHARS = 500
 
 
 class SettingsStates(StatesGroup):
-    awaiting_openrouter_api_key = State()
     awaiting_yandex_api_key = State()
     awaiting_agent_prompt = State()
     browsing_favorites = State()
@@ -136,13 +132,20 @@ def _providers_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _openrouter_keyboard(*, has_key: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="+ API", callback_data=SettingsCB(action="openrouter_add_api").pack())]
-    ]
-    if has_key:
-        rows.append([InlineKeyboardButton(text="Избранное", callback_data=SettingsCB(action="favorites").pack())])
-        rows.append([InlineKeyboardButton(text="Обновить список моделей", callback_data=SettingsCB(action="refresh").pack())])
+def _openrouter_keyboard(*, openrouter_configured: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if openrouter_configured:
+        rows.append(
+            [InlineKeyboardButton(text="Избранное", callback_data=SettingsCB(action="favorites").pack())]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Обновить список моделей",
+                    callback_data=SettingsCB(action="refresh").pack(),
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton(text="Назад", callback_data=SettingsCB(action="providers").pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -227,15 +230,19 @@ def _models_page_keyboard(
 
 async def _settings_status_text() -> str:
     store = get_settings_store()
-    openrouter_api_key = await store.get_openrouter_api_key()
-    has_db_openrouter_key = await store.has_db_openrouter_api_key()
+    cfg = get_settings()
+    openrouter_api_key = (cfg.OPENROUTER_API_KEY or "").strip()
     yandex_api_key = await store.get_yandex_api_key()
     has_db_yandex_key = await store.has_db_yandex_api_key()
 
-    openrouter_src = "БД" if has_db_openrouter_key else ("ENV" if openrouter_api_key else "не задан")
+    openrouter_src = "ENV" if openrouter_api_key else "не задан"
     yandex_src = "БД" if has_db_yandex_key else "не задан"
-    openrouter_line = f"OpenRouter: <b>{openrouter_src}</b>" + (f" ({_mask_key(openrouter_api_key or '')})" if openrouter_api_key else "")
-    yandex_line = f"Yandex: <b>{yandex_src}</b>" + (f" ({_mask_key(yandex_api_key or '')})" if yandex_api_key else "")
+    openrouter_line = f"OpenRouter: <b>{openrouter_src}</b>" + (
+        f" ({_mask_key(openrouter_api_key)})" if openrouter_api_key else ""
+    )
+    yandex_line = f"Yandex: <b>{yandex_src}</b>" + (
+        f" ({_mask_key(yandex_api_key or '')})" if yandex_api_key else ""
+    )
     return (
         f"{openrouter_line}\n"
         f"{yandex_line}\n"
@@ -269,14 +276,22 @@ async def _render_provider_menu(message: Message) -> None:
 
 
 async def _render_openrouter_menu(message: Message) -> None:
-    store = get_settings_store()
-    api_key = await store.get_openrouter_api_key()
+    cfg = get_settings()
+    api_key = (cfg.OPENROUTER_API_KEY or "").strip()
     has_key = bool(api_key)
-    source = "БД" if await store.has_db_openrouter_api_key() else ("ENV" if api_key else "не задан")
     body = ["<b>OpenRouter</b>"]
-    body.append(f"Ключ: <b>{source}</b> ({_mask_key(api_key or '')})" if has_key else "Ключ: <b>не задан</b>")
-    body.append("Добавьте ключ через + API. После успешной проверки откроется выбор моделей.")
-    await _edit_or_answer(message, "\n\n".join(body), _openrouter_keyboard(has_key=has_key))
+    body.append(
+        f"Ключ: <b>ENV</b> ({_mask_key(api_key)})" if has_key else "Ключ: <b>не задан</b> в переменных окружения"
+    )
+    body.append(
+        "API-ключ задаётся только через <code>OPENROUTER_API_KEY</code> в окружении "
+        "(Railway Variables / docker-compose). Здесь доступны избранные модели и overrides."
+    )
+    await _edit_or_answer(
+        message,
+        "\n\n".join(body),
+        _openrouter_keyboard(openrouter_configured=has_key),
+    )
 
 
 async def _render_yandex_menu(message: Message) -> None:
@@ -508,18 +523,6 @@ async def cb_close(callback: CallbackQuery, callback_data: SettingsCB, state: FS
     await callback.answer()
 
 
-@settings_router.callback_query(SettingsCB.filter(F.action == "openrouter_add_api"), AdminFilter())
-async def cb_openrouter_add_api(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
-    await state.set_state(SettingsStates.awaiting_openrouter_api_key)
-    if isinstance(callback.message, Message):
-        await callback.message.answer(
-            "Отправьте OpenRouter API key одним сообщением "
-            f"(префикс <code>{_API_KEY_PREFIX}</code>).\n"
-            "Ключ будет проверен через <code>GET /api/v1/key</code>."
-        )
-    await callback.answer()
-
-
 @settings_router.callback_query(SettingsCB.filter(F.action == "yandex_add_api"), AdminFilter())
 async def cb_yandex_add_api(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     await state.set_state(SettingsStates.awaiting_yandex_api_key)
@@ -529,33 +532,6 @@ async def cb_yandex_add_api(callback: CallbackQuery, callback_data: SettingsCB, 
             "Это заглушка: ключ сохранится, но пока не используется в runtime."
         )
     await callback.answer()
-
-
-@settings_router.message(SettingsStates.awaiting_openrouter_api_key, AdminFilter())
-async def on_openrouter_api_key_message(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if not raw:
-        await message.answer("Пустое сообщение. Отправьте ключ ещё раз или /cancel.")
-        return
-    if not raw.startswith(_API_KEY_PREFIX):
-        await message.answer(f"Ожидается ключ с префиксом <code>{_API_KEY_PREFIX}</code>. Попробуйте ещё раз или /cancel.")
-        return
-    try:
-        await message.delete()
-    except Exception:  # noqa: BLE001
-        log.debug("Could not delete user message with OpenRouter API key", exc_info=True)
-    ok, detail = await _validate_openrouter_key(raw)
-    if not ok:
-        await message.answer(f"Ключ не прошёл валидацию: {detail}\nПопробуйте ещё раз или /cancel.")
-        return
-    if message.from_user is None:
-        await state.clear()
-        return
-    store = get_settings_store()
-    await store.set_openrouter_api_key(raw, by_user_id=message.from_user.id)
-    await state.clear()
-    enc = "включено" if store.encryption_enabled else "выключено (plaintext)"
-    await message.answer(f"OpenRouter ключ обновлён. Шифрование: <b>{enc}</b>.\n{detail}", reply_markup=_openrouter_keyboard(has_key=True))
 
 
 @settings_router.message(SettingsStates.awaiting_yandex_api_key, AdminFilter())
@@ -587,35 +563,17 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Отменено.", reply_markup=_main_keyboard())
 
 
-async def _validate_openrouter_key(api_key: str) -> tuple[bool, str]:
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-            response = await client.get(_VALIDATE_URL, headers={"Authorization": f"Bearer {api_key}"})
-    except httpx.HTTPError as exc:
-        return False, f"сетевая ошибка ({exc.__class__.__name__})"
-    if 200 <= response.status_code < 300:
-        try:
-            data = response.json()
-            payload = data.get("data") or {}
-            limit = payload.get("limit")
-            usage = payload.get("usage")
-            if limit is not None and usage is not None:
-                return True, f"квота {usage} / {limit}"
-        except Exception:  # noqa: BLE001
-            log.debug("Failed to parse /key response", exc_info=True)
-        return True, "ключ валиден"
-    if response.status_code in (401, 403):
-        return False, "OpenRouter отверг ключ (401/403)"
-    return False, f"HTTP {response.status_code}"
-
-
 @settings_router.callback_query(SettingsCB.filter(F.action == "reset"), AdminFilter())
 async def cb_reset(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     await state.clear()
     store = get_settings_store()
     await store.reset_all_overrides()
     if isinstance(callback.message, Message):
-        await _edit_or_answer(callback.message, "Все model overrides удалены. API-ключи остались без изменений.", _api_keyboard())
+        await _edit_or_answer(
+            callback.message,
+            "Все model overrides удалены. OpenRouter ключ в ENV не меняется.",
+            _api_keyboard(),
+        )
     await callback.answer("Готово")
 
 
@@ -625,7 +583,12 @@ async def cb_refresh(callback: CallbackQuery, callback_data: SettingsCB, state: 
     models = await get_openrouter_models_client().fetch(force=True)
     text = f"Список моделей обновлён. Доступно: <b>{len(models)}</b>."
     if isinstance(callback.message, Message):
-        await _edit_or_answer(callback.message, text, _openrouter_keyboard(has_key=True))
+        or_ok = bool((get_settings().OPENROUTER_API_KEY or "").strip())
+        await _edit_or_answer(
+            callback.message,
+            text,
+            _openrouter_keyboard(openrouter_configured=or_ok),
+        )
     await callback.answer("Готово")
 
 

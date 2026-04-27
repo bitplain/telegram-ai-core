@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from app.agents.schemas import AgentProfile
+from app.config import get_settings
 from app.core.services.user_agent_settings import UserAgentSettingsService
 from app.core.settings_store import get_settings_store
 from app.llm.openrouter_client import (
@@ -173,10 +174,7 @@ class Orchestrator:
         Бросает ``OpenRouterError`` наружу — handler решает, что показать пользователю.
         """
         model = plan.model
-        # Подтягиваем актуальный API-ключ (БД → ENV) непосредственно перед запросом,
-        # чтобы admin /settings вступал в силу без рестарта процесса.
-        store = get_settings_store()
-        api_key = await store.get_openrouter_api_key()
+        api_key = (get_settings().OPENROUTER_API_KEY or "").strip() or None
 
         if model.supports_streaming:
             async for chunk in self._client.stream_chat_completion(
