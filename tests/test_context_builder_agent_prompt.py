@@ -69,3 +69,23 @@ async def test_context_builder_uses_explicit_agent_scoped_history(monkeypatch) -
     assert repo.list_recent_for_agent_calls == [
         {"conversation_id": "conv-1", "agent_id": "crypto", "limit": 20}
     ]
+
+
+async def test_context_builder_appends_memory_suffix(monkeypatch) -> None:
+    import app.core.context_builder as module
+
+    repo = _FakeMessageRepo()
+    monkeypatch.setattr(module, "MessageRepository", lambda session: repo)
+    builder = ContextBuilder(session=None)  # type: ignore[arg-type]
+    agent = get_agent_registry().get("crypto")
+
+    messages = await builder.build_messages(
+        conversation=_FakeConversation(),  # type: ignore[arg-type]
+        agent=agent,
+        system_prompt_override="Base",
+        memory_system_append="\n\n---\nMemory: test fact",
+    )
+
+    assert messages[0]["role"] == "system"
+    assert "Base" in messages[0]["content"]
+    assert "test fact" in messages[0]["content"]

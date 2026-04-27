@@ -403,19 +403,8 @@ async def cmd_history(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
-# /memory (пока не реализована)
+# /memory — app/bot/handlers/memory.py
 # ---------------------------------------------------------------------------
-
-
-@router.message(Command("memory"))
-async def cmd_memory(message: Message) -> None:
-    await send_plain(
-        message.bot,
-        message.chat.id,
-        "Долговременная память ещё не подключена.\n\n"
-        "План: /memory add текст, /memory list, /memory clear.\n"
-        "Пока контекст — только текущий диалог (см. /history).",
-    )
 
 
 # ---------------------------------------------------------------------------

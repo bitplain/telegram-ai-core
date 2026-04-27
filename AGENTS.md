@@ -15,6 +15,7 @@
 - **Не коммитить `.env`** (он в `.gitignore`). Менять только `.env.example`.
 - Не логировать значения `*token*`, `*key*`, `*password*`, `*secret*` — фильтр в `app/logging_config.py` маскирует их автоматически, но и в коде не передавайте такие значения в `extra={...}`.
 - Маскировать пароль в `DATABASE_URL` / `REDIS_URL` перед логированием.
+- `app/core/sensitive_message_guard.py` — **до любой DB write** (включая идемпотентность) отсекает обычные сообщения, похожие на сид/мнемонику/приватный ключ. При блокировке: только `log.info` с `reason` + `telegram_user_id`, **без** текста сообщения, без записи в `messages` и без вызова LLM. Команды `/remember` и `/memory add_agent` тоже проверяются до сохранения.
 
 ## Структура и слои
 
@@ -95,5 +96,5 @@
 ## MVP-ограничения, которые мы сознательно держим
 
 - Tools для агентов архитектурно заложены (`AgentProfile.allowed_tools`), но не реализованы.
-- Нет pgvector / RAG / managed bots / долговременной memory.
+- Нет pgvector / RAG / managed bots. Long-term `memories` — таблица в PostgreSQL, не дублирует `messages` history; контекст подмешивается в system prompt.
 - Webhook-маршрут есть, но MVP проверяется через polling.
