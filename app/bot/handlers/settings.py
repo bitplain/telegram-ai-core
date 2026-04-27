@@ -39,7 +39,7 @@ class SettingsStates(StatesGroup):
     awaiting_openrouter_api_key = State()
     awaiting_yandex_api_key = State()
     awaiting_agent_prompt = State()
-    awaiting_model_for_profile = State()
+    browsing_favorites = State()
 
 
 class SettingsCB(CallbackData, prefix="s"):
@@ -141,7 +141,7 @@ def _openrouter_keyboard(*, has_key: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="+ API", callback_data=SettingsCB(action="openrouter_add_api").pack())]
     ]
     if has_key:
-        rows.append([InlineKeyboardButton(text="Выбрать модель", callback_data=SettingsCB(action="profiles").pack())])
+        rows.append([InlineKeyboardButton(text="Избранное", callback_data=SettingsCB(action="favorites").pack())])
         rows.append([InlineKeyboardButton(text="Обновить список моделей", callback_data=SettingsCB(action="refresh").pack())])
     rows.append([InlineKeyboardButton(text="Назад", callback_data=SettingsCB(action="providers").pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -178,33 +178,41 @@ def _agent_keyboard(agent_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def _agent_models_keyboard(agent_id: str, service: UserAgentSettingsService | None = None) -> InlineKeyboardMarkup:
-    service = service or UserAgentSettingsService()
+def _agent_models_keyboard(agent_id: str, favorite_slugs: list[str]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=_model_label(model)[:64],
-                callback_data=SettingsCB(action="agent_set_model", arg1=agent_id, arg2=model.id).pack(),
+                text=slug[:64],
+                callback_data=SettingsCB(action="agent_set_model", arg1=agent_id, arg2=slug).pack(),
             )
         ]
-        for model in service.list_enabled_models()
+        for slug in favorite_slugs
     ]
+    if not rows:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Избранное пусто",
+                    callback_data=SettingsCB(action="noop").pack(),
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton(text="Назад", callback_data=SettingsCB(action="agent", arg1=agent_id).pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _profiles_keyboard() -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for profile in get_model_registry().list_enabled():
-        rows.append([InlineKeyboardButton(text=profile.display_name, callback_data=SettingsCB(action="profile", arg1=profile.id).pack())])
-    rows.append([InlineKeyboardButton(text="Назад", callback_data=SettingsCB(action="provider", arg1="openrouter").pack())])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _models_page_keyboard(*, page: int, total_pages: int, page_models: list[ModelInfo]) -> InlineKeyboardMarkup:
+def _models_page_keyboard(
+    *,
+    page: int,
+    total_pages: int,
+    page_models: list[ModelInfo],
+    favorite_slugs: set[str] | None = None,
+) -> InlineKeyboardMarkup:
+    favorite_slugs = favorite_slugs or set()
     rows: list[list[InlineKeyboardButton]] = []
     for idx, model in enumerate(page_models):
-        rows.append([InlineKeyboardButton(text=f"{model.provider} / {model.name}"[:64], callback_data=SettingsCB(action="pick", arg1=str(page), arg2=str(idx)).pack())])
+        mark = "✓ " if model.id in favorite_slugs else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{model.id}"[:64], callback_data=SettingsCB(action="fav_pick", arg1=str(page), arg2=str(idx)).pack())])
 
     nav: list[InlineKeyboardButton] = []
     if page > 0:
@@ -213,7 +221,7 @@ def _models_page_keyboard(*, page: int, total_pages: int, page_models: list[Mode
     if page < total_pages - 1:
         nav.append(InlineKeyboardButton(text="›", callback_data=SettingsCB(action="page", arg1=str(page + 1)).pack()))
     rows.append(nav)
-    rows.append([InlineKeyboardButton(text="Назад", callback_data=SettingsCB(action="profiles").pack())])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data=SettingsCB(action="provider", arg1="openrouter").pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -425,11 +433,15 @@ async def cb_agent_models(callback: CallbackQuery, callback_data: SettingsCB, st
     except UnknownAgentError:
         await callback.answer("Агент не найден", show_alert=True)
         return
+    favorite_slugs = await service.list_favorite_model_slugs()
     if isinstance(callback.message, Message):
+        text = f"<b>Выберите модель для агента {settings.agent.name}</b>:"
+        if not favorite_slugs:
+            text += "\n\nИзбранное пусто. Добавьте модели: /settings → API → OpenRouter → Избранное."
         await _edit_or_answer(
             callback.message,
-            f"<b>Выберите модель для агента {settings.agent.name}</b>:",
-            _agent_models_keyboard(settings.agent.id, service),
+            text,
+            _agent_models_keyboard(settings.agent.id, favorite_slugs),
         )
     await callback.answer()
 
@@ -610,27 +622,14 @@ async def cb_refresh(callback: CallbackQuery, callback_data: SettingsCB, state: 
     await callback.answer("Готово")
 
 
-@settings_router.callback_query(SettingsCB.filter(F.action == "profiles"), AdminFilter())
-async def cb_profiles(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
-    if isinstance(callback.message, Message):
-        await _edit_or_answer(callback.message, "Выберите профиль модели для переопределения:", _profiles_keyboard())
-    await callback.answer()
-
-
-@settings_router.callback_query(SettingsCB.filter(F.action == "profile"), AdminFilter())
-async def cb_profile(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
-    profile_id = callback_data.arg1
-    profile = get_model_registry().get_or_none(profile_id)
-    if profile is None:
-        await callback.answer("Профиль не найден", show_alert=True)
-        return
+@settings_router.callback_query(SettingsCB.filter(F.action == "favorites"), AdminFilter())
+async def cb_favorites(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.browsing_favorites)
     models = await get_openrouter_models_client().fetch(force=False)
     if not models:
-        await callback.answer("Список моделей пуст. Сначала «Обновить список моделей».", show_alert=True)
+        await callback.answer("Список моделей пуст. Сначала обновите список моделей.", show_alert=True)
         return
-    await state.set_state(SettingsStates.awaiting_model_for_profile)
     await state.update_data(
-        profile_id=profile_id,
         models=[
             {
                 "id": m.id,
@@ -641,7 +640,7 @@ async def cb_profile(callback: CallbackQuery, callback_data: SettingsCB, state: 
                 "pricing_completion": m.pricing_completion,
             }
             for m in models
-        ],
+        ]
     )
     await _render_models_page(callback, state, page=0)
 
@@ -659,10 +658,11 @@ async def cb_page(callback: CallbackQuery, callback_data: SettingsCB, state: FSM
 async def _render_models_page(callback: CallbackQuery, state: FSMContext, *, page: int) -> None:
     data = await state.get_data()
     models_data = data.get("models") or []
-    profile_id = data.get("profile_id") or ""
-    if not models_data or not profile_id:
+    if not models_data:
         await callback.answer("Сессия истекла, откройте /settings заново.", show_alert=True)
         return
+    store = get_settings_store()
+    favorites = set(await store.list_openrouter_favorite_models())
     total = len(models_data)
     total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
@@ -679,19 +679,18 @@ async def _render_models_page(callback: CallbackQuery, state: FSMContext, *, pag
         )
         for m in chunk
     ]
-    profile = get_model_registry().get_or_none(profile_id)
-    title = profile.display_name if profile else profile_id
-    lines = [f"<b>Модели для профиля</b>: {title}", ""]
+    lines = ["<b>Избранные модели OpenRouter</b>", "", "Нажмите модель, чтобы добавить/убрать её из избранного.", ""]
     for idx, model in enumerate(page_models):
-        lines.append(f"{idx + 1}. <code>{model.id}</code> — prompt {_format_price(model.pricing_prompt)}, completion {_format_price(model.pricing_completion)}")
-    keyboard = _models_page_keyboard(page=page, total_pages=total_pages, page_models=page_models)
+        mark = "✓" if model.id in favorites else " "
+        lines.append(f"{idx + 1}. {mark} <code>{model.id}</code> — prompt {_format_price(model.pricing_prompt)}, completion {_format_price(model.pricing_completion)}")
+    keyboard = _models_page_keyboard(page=page, total_pages=total_pages, page_models=page_models, favorite_slugs=favorites)
     if isinstance(callback.message, Message):
         await _edit_or_answer(callback.message, "\n".join(lines), keyboard)
     await callback.answer()
 
 
-@settings_router.callback_query(SettingsCB.filter(F.action == "pick"), AdminFilter())
-async def cb_pick(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
+@settings_router.callback_query(SettingsCB.filter(F.action == "fav_pick"), AdminFilter())
+async def cb_fav_pick(callback: CallbackQuery, callback_data: SettingsCB, state: FSMContext) -> None:
     try:
         page = int(callback_data.arg1)
         idx = int(callback_data.arg2)
@@ -700,27 +699,23 @@ async def cb_pick(callback: CallbackQuery, callback_data: SettingsCB, state: FSM
         return
     data = await state.get_data()
     models_data = data.get("models") or []
-    profile_id = data.get("profile_id") or ""
-    if not models_data or not profile_id:
-        await callback.answer("Сессия истекла, откройте /settings заново.", show_alert=True)
-        return
     absolute_idx = page * _PAGE_SIZE + idx
     if absolute_idx < 0 or absolute_idx >= len(models_data):
         await callback.answer("Модель не найдена", show_alert=True)
         return
-    chosen_id = models_data[absolute_idx].get("id") or ""
-    if not chosen_id:
+    slug = models_data[absolute_idx].get("id") or ""
+    if not slug:
         await callback.answer("Модель без id", show_alert=True)
         return
     store = get_settings_store()
-    await store.set_model_override(profile_id, chosen_id, by_user_id=callback.from_user.id)
-    await state.clear()
-    profile = get_model_registry().get_or_none(profile_id)
-    title = profile.display_name if profile else profile_id
-    text = f"Профиль <b>{title}</b> теперь использует модель <code>{chosen_id}</code>."
-    if isinstance(callback.message, Message):
-        await _edit_or_answer(callback.message, text, _openrouter_keyboard(has_key=True))
-    await callback.answer("Сохранено")
+    favorites = set(await store.list_openrouter_favorite_models())
+    if slug in favorites:
+        await store.remove_openrouter_favorite_model(slug, by_user_id=callback.from_user.id)
+        await callback.answer("Убрано из избранного")
+    else:
+        await store.add_openrouter_favorite_model(slug, by_user_id=callback.from_user.id)
+        await callback.answer("Добавлено в избранное")
+    await _render_models_page(callback, state, page=page)
 
 
 __all__ = ["settings_router", "SettingsStates"]

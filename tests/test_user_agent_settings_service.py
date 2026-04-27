@@ -76,6 +76,14 @@ def service(repo: _MemoryUserAgentSettingsRepository) -> UserAgentSettingsServic
     return UserAgentSettingsService(repository=repo, prompt_max_length=20)
 
 
+class _FavoriteStore:
+    def __init__(self, favorites: list[str]) -> None:
+        self._favorites = favorites
+
+    async def list_openrouter_favorite_models(self) -> list[str]:
+        return self._favorites
+
+
 @pytest.mark.asyncio
 async def test_effective_settings_fallback_to_default_prompt_and_model(
     service: UserAgentSettingsService,
@@ -169,6 +177,49 @@ async def test_invalid_model_id_raises(service: UserAgentSettingsService) -> Non
             telegram_user_id=100,
             agent_id="crypto",
             model_id="missing-model",
+        )
+
+
+@pytest.mark.asyncio
+async def test_set_model_accepts_favorite_openrouter_slug(
+    repo: _MemoryUserAgentSettingsRepository,
+) -> None:
+    service = UserAgentSettingsService(
+        repository=repo,
+        prompt_max_length=20,
+        settings_store=_FavoriteStore(["openai/gpt-4.1-mini"]),  # type: ignore[arg-type]
+    )
+
+    await service.set_model_id(
+        telegram_user_id=100,
+        agent_id="crypto",
+        model_id="openai/gpt-4.1-mini",
+    )
+
+    result = await service.get_effective_settings(
+        telegram_user_id=100,
+        agent_id="crypto",
+    )
+    assert result.selected_model is not None
+    assert result.selected_model.model_name == "openai/gpt-4.1-mini"
+    assert result.effective_model.model_name == "openai/gpt-4.1-mini"
+
+
+@pytest.mark.asyncio
+async def test_set_model_rejects_non_favorite_openrouter_slug(
+    repo: _MemoryUserAgentSettingsRepository,
+) -> None:
+    service = UserAgentSettingsService(
+        repository=repo,
+        prompt_max_length=20,
+        settings_store=_FavoriteStore(["anthropic/claude-3-haiku"]),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(UnknownModelError):
+        await service.set_model_id(
+            telegram_user_id=100,
+            agent_id="crypto",
+            model_id="openai/gpt-4.1-mini",
         )
 
 
