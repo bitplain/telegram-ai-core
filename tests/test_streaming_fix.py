@@ -210,11 +210,23 @@ async def test_throttling_skips_small_delta_update() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalize_sends_final_message() -> None:
+async def test_finalize_does_not_duplicate_stream_message() -> None:
     bot = _FakeBot()
     renderer = _make_renderer(bot)
 
     await renderer.push("x" * 30)
+    await renderer.finalize()
+
+    assert bot.send_calls == []
+    assert len(bot.draft_calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_finalize_sends_message_when_no_stream_message_exists() -> None:
+    bot = _FakeBot()
+    renderer = _make_renderer(bot)
+    renderer._buffer = "x" * 30
+
     await renderer.finalize()
 
     assert len(bot.send_calls) == 1
