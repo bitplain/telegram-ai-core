@@ -12,6 +12,7 @@ from aiogram.types import Message
 
 from app.agents.registry import get_agent_registry
 from app.bot.renderers.telegram_text import escape_html, send_long_html, send_plain
+from app.config import get_settings
 from app.core.prompts import (
     HELP_MESSAGE,
     MODEL_NOT_ALLOWED_FOR_AGENT,
@@ -20,6 +21,7 @@ from app.core.prompts import (
     UNKNOWN_MODEL,
     UNKNOWN_SKILL,
 )
+from app.core.settings_store import get_settings_store
 from app.db.models import (
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
@@ -140,15 +142,35 @@ async def cmd_status(message: Message) -> None:
     skill = get_skill_registry().get(conv.active_skill_id)
     model = get_model_registry().get(conv.active_model_id)
 
-    text = (
-        "<b>Текущий контекст диалога</b>\n"
-        f"Агент: <code>{escape_html(agent.id)}</code> — {escape_html(agent.name)}\n"
-        f"Навык: <code>{escape_html(skill.id)}</code> — {escape_html(skill.name)}\n"
-        f"Модель: <code>{escape_html(model.id)}</code> — {escape_html(model.display_name)}\n"
+    lines = [
+        "<b>Текущий контекст диалога</b>",
+        f"Агент: <code>{escape_html(agent.id)}</code> — {escape_html(agent.name)}",
+        f"Навык: <code>{escape_html(skill.id)}</code> — {escape_html(skill.name)}",
+        f"Модель: <code>{escape_html(model.id)}</code> — {escape_html(model.display_name)}",
         f"Провайдер: <code>{escape_html(model.provider)}</code> "
-        f"({escape_html(model.model_name)})"
-    )
-    await send_plain(message.bot, message.chat.id, text)
+        f"({escape_html(model.model_name)})",
+    ]
+
+    if message.from_user is not None:
+        admin_ids = get_settings().admin_telegram_user_ids
+        if message.from_user.id in admin_ids:
+            store = get_settings_store()
+            api_key = await store.get_openrouter_api_key()
+            has_db_key = await store.has_db_openrouter_api_key()
+            if api_key and has_db_key:
+                source = "db"
+            elif api_key:
+                source = "env"
+            else:
+                source = "не задан"
+            lines.append(f"OpenRouter API key: <b>{escape_html(source)}</b>")
+            override = await store.get_model_override(model.id)
+            if override:
+                lines.append(
+                    f"Override активной модели: <code>{escape_html(override)}</code>"
+                )
+
+    await send_plain(message.bot, message.chat.id, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -345,12 +367,17 @@ async def cmd_skill_alias(message: Message) -> None:
 async def cmd_models(message: Message) -> None:
     registry = get_model_registry()
     models = registry.list_enabled()
+    overrides = await get_settings_store().list_model_overrides()
     lines = ["<b>Доступные модели:</b>"]
     for m in models:
-        lines.append(
+        line = (
             f"• <code>{escape_html(m.id)}</code> — <b>{escape_html(m.display_name)}</b> "
             f"({escape_html(m.tier)}, {escape_html(m.provider)}/{escape_html(m.model_name)})"
         )
+        override = overrides.get(m.id)
+        if override:
+            line += f" — <i>override: {escape_html(override)}</i>"
+        lines.append(line)
     lines.append("\nВыбрать модель: /model &lt;id&gt;")
     await send_long_html(message.bot, message.chat.id, "\n".join(lines))
 

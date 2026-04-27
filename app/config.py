@@ -17,7 +17,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote_plus, urlparse, urlunparse
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -158,6 +158,13 @@ class Settings(BaseSettings):
     # --- Diagnostics ---
     # Если задан, эндпоинт /diagnostics требует X-Diagnostics-Token.
     DIAGNOSTICS_TOKEN: str = ""
+
+    # --- Admin / runtime settings (BD-overrides управляются через бот) ---
+    # CSV списка Telegram user-id, которым разрешена команда /settings.
+    ADMIN_TELEGRAM_USER_IDS_RAW: str = Field("", alias="ADMIN_TELEGRAM_USER_IDS")
+    # Опциональный Fernet-ключ для шифрования секретов в таблице app_settings.
+    # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    SETTINGS_ENCRYPTION_KEY: str | None = Field(default=None)
 
     # --- Renderer ---
     TELEGRAM_DRAFT_MIN_INTERVAL_MS: int = 500
@@ -312,6 +319,28 @@ class Settings(BaseSettings):
     def is_strict_env(self) -> bool:
         """В этих окружениях DATABASE_URL/REDIS_URL обязаны быть заданы."""
         return self.APP_ENV in {"railway", "production"}
+
+    # --- Admin ---
+
+    @property
+    def admin_telegram_user_ids(self) -> list[int]:
+        """Парсит ADMIN_TELEGRAM_USER_IDS_RAW (CSV) в список int.
+
+        Невалидные значения молча пропускаются. Пустая строка — пустой список.
+        """
+        raw = (self.ADMIN_TELEGRAM_USER_IDS_RAW or "").strip()
+        if not raw:
+            return []
+        out: list[int] = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                out.append(int(item))
+            except ValueError:
+                continue
+        return out
 
     # ------------------------------------------------------------------
     # Validators

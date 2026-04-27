@@ -181,6 +181,45 @@ curl https://<your-app>.up.railway.app/diagnostics
 - `/skills`, `/skill <id>` — список и переключение skill.
 - `/models`, `/model <id>` — список и переключение модели (только если она в `allowed_model_ids` активного агента).
 - Алиасы skill-ов: `/chat`, `/fast`, `/crypto`, `/finance`, `/news`, `/devops`, `/infra`.
+- `/settings` — admin-only inline-меню (см. ниже).
+
+## Admin `/settings`
+
+Команда `/settings` доступна только пользователям из `ADMIN_TELEGRAM_USER_IDS`
+и позволяет менять «горячие» runtime-настройки без redeploy:
+
+- **OpenRouter API key** — приоритет: значение из БД (`app_settings`) →
+  `OPENROUTER_API_KEY` из ENV. После сохранения через бота все следующие LLM-
+  запросы используют новый ключ (Redis-кеш TTL 60 секунд).
+  - Перед сохранением ключ валидируется через `GET https://openrouter.ai/api/v1/key`.
+  - Сообщение пользователя с ключом удаляется из чата сразу.
+  - Если задан `SETTINGS_ENCRYPTION_KEY` — ключ шифруется Fernet-ом.
+- **Model override** — для любого `ModelProfile` (`default_balanced`,
+  `crypto_model` и т.д.) можно подменить OpenRouter slug на любую модель
+  из `GET /api/v1/models`. Override применяется в `Orchestrator.plan_async`.
+- **Сброс overrides** удаляет все `model_override.*` из `app_settings`,
+  ENV-ключ остаётся без изменений.
+- **Обновить список моделей** — принудительно перетянуть `/api/v1/models`
+  и положить в Redis-кеш на 12 часов.
+
+### Настройка
+
+1. Узнай свой Telegram user ID — например, через [@userinfobot](https://t.me/userinfobot).
+2. В переменные окружения добавь:
+   ```
+   ADMIN_TELEGRAM_USER_IDS=123456789,987654321
+   SETTINGS_ENCRYPTION_KEY=<fernet-key>
+   ```
+3. `SETTINGS_ENCRYPTION_KEY` сгенерируй один раз и храни в секрете:
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+4. Применить миграции — `alembic upgrade head` (entrypoint Railway делает это сам).
+5. Перезапустить сервис, отправить боту `/settings` от admin-аккаунта.
+
+Если `SETTINGS_ENCRYPTION_KEY` не задан, секреты лежат в БД в открытом виде —
+бот при сохранении ключа печатает явный warning. Для production это не
+рекомендуется.
 
 ## Ограничения окружения Railway
 

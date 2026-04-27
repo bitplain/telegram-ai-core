@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -268,6 +270,40 @@ class ProcessedUpdate(Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# app_settings — runtime-настройки, управляемые через admin /settings
+# ---------------------------------------------------------------------------
+
+
+class AppSetting(Base):
+    """Runtime-настройки приложения (key/value) с опциональным шифрованием.
+
+    Используемые ключи:
+    - ``openrouter_api_key`` — переопределение ENV-ключа OpenRouter (encrypted,
+      если задан SETTINGS_ENCRYPTION_KEY).
+    - ``model_override.<model_id>`` — переопределение OpenRouter slug-а для
+      конкретного ModelProfile, например ``model_override.default_balanced``.
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    is_encrypted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+    updated_by_telegram_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+
+
 __all__ = [
     "Base",
     "User",
@@ -276,6 +312,7 @@ __all__ = [
     "Message",
     "LLMRequest",
     "ProcessedUpdate",
+    "AppSetting",
     "CONVERSATION_STATUS_ACTIVE",
     "CONVERSATION_STATUS_CLOSED",
     "MESSAGE_DIRECTION_INBOUND",

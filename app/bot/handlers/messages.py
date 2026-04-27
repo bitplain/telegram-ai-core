@@ -10,7 +10,6 @@ from aiogram.types import Message
 from app.agents.registry import get_agent_registry
 from app.bot.renderers.telegram_stream_renderer import TelegramStreamRenderer
 from app.bot.renderers.telegram_text import send_plain
-from app.config import get_settings
 from app.core.context_builder import ContextBuilder
 from app.core.idempotency import is_first_seen
 from app.core.orchestrator import Orchestrator
@@ -21,6 +20,7 @@ from app.core.prompts import (
     RATE_LIMIT_MESSAGE,
 )
 from app.core.rate_limit import RateLimiter
+from app.core.settings_store import get_settings_store
 from app.db.models import (
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
@@ -62,8 +62,6 @@ async def process_user_message(
     text = text.strip()
     if not text:
         return
-
-    settings = get_settings()
 
     # 1) Идемпотентность апдейтов.
     update_id = getattr(message, "_telegram_update_id", None)
@@ -156,8 +154,10 @@ async def process_user_message(
             return
 
     # 6) Если OpenRouter не настроен — отвечаем заглушкой.
+    # Учитываем как ENV, так и БД-override (admin /settings).
     or_client = get_openrouter_client()
-    if not or_client.is_configured or not settings.OPENROUTER_API_KEY:
+    effective_api_key = await get_settings_store().get_openrouter_api_key()
+    if not effective_api_key:
         await send_plain(message.bot, message.chat.id, OPENROUTER_NOT_CONFIGURED)
         return
 
@@ -173,7 +173,7 @@ async def process_user_message(
         )
 
     orchestrator = Orchestrator(client=or_client)
-    plan = orchestrator.plan(
+    plan = await orchestrator.plan_async(
         agent=agent,
         skill=skill,
         explicit_model_id=None,  # активная модель из conversation учитывается через update_active_routing
@@ -188,7 +188,7 @@ async def process_user_message(
         )
         agent = await cb.resolve_agent(conversation)
         # План мог зависеть от другого агента — перестроим под актуальный.
-        plan = orchestrator.plan(agent=agent, skill=skill)
+        plan = await orchestrator.plan_async(agent=agent, skill=skill)
         messages_payload = await cb.build_messages(
             conversation=conversation, agent=agent
         )
@@ -216,6 +216,7 @@ async def process_user_message(
 
     final_text = ""
     error_text: str | None = None
+    error_text_for_db: str | None = None
     try:
         async for chunk in orchestrator.run(plan=plan, messages=messages_payload):
             if chunk.content_delta:
@@ -224,15 +225,20 @@ async def process_user_message(
                 break
         result = await renderer.finalize()
         final_text = result.final_text
-    except OpenRouterAuthError:
+    except OpenRouterAuthError as exc:
         log.warning("OpenRouter auth error during streaming")
         error_text = OPENROUTER_NOT_CONFIGURED
+        error_text_for_db = repr(exc)[:500]
     except OpenRouterError as exc:
         log.warning("OpenRouter error: %s", exc.__class__.__name__)
         error_text = LLM_GENERIC_ERROR
-    except Exception:  # noqa: BLE001
+        error_text_for_db = repr(exc)[:500]
+    except Exception as exc:  # noqa: BLE001
         log.exception("Unexpected error in LLM streaming pipeline")
         error_text = LLM_GENERIC_ERROR
+        # Полный repr (вместе с типом и сообщением) — для post-mortem в БД,
+        # пользователю по-прежнему отдаём дружелюбный LLM_GENERIC_ERROR.
+        error_text_for_db = repr(exc)[:500]
 
     # 9) Если стрим был пустой — отвечаем фолбэком.
     if not final_text and error_text is None:
@@ -242,7 +248,10 @@ async def process_user_message(
         await send_plain(message.bot, message.chat.id, error_text)
         async with session_scope() as session:
             llm_repo = LLMRequestRepository(session)
-            await llm_repo.mark_error(request_id=request_id, error=error_text)
+            await llm_repo.mark_error(
+                request_id=request_id,
+                error=error_text_for_db or error_text,
+            )
         return
 
     # 10) Успех: пишем outbound и помечаем llm_request успешным.

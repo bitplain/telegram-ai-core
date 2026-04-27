@@ -114,6 +114,37 @@ bash scripts/railway-bind.sh
 |---|---|---|
 | `DIAGNOSTICS_TOKEN` | `""` | Если задано — `GET /diagnostics` требует заголовок `X-Diagnostics-Token: <value>`, иначе 403. По умолчанию эндпоинт открыт. |
 
+## 8.1. Admin settings
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `ADMIN_TELEGRAM_USER_IDS` | `""` | CSV Telegram user-id, кому разрешена команда `/settings`. Пустая строка / невалидные значения молча игнорируются. ID можно узнать через [@userinfobot](https://t.me/userinfobot). |
+| `SETTINGS_ENCRYPTION_KEY` | `""` | Fernet-ключ (URL-safe base64, 32 байта). Если задан — OpenRouter API key, сохранённый через `/settings`, шифруется в таблице `app_settings`. Если не задан — секреты хранятся в plaintext (только для dev). |
+
+Сгенерировать `SETTINGS_ENCRYPTION_KEY`:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Команда `/settings` (только админам):
+
+- **Установить OpenRouter API key** — валидация через `GET /api/v1/key`,
+  сохранение в БД (Fernet-шифрование, если ключ задан), Redis-кеш 60 секунд.
+- **Сменить модель** — переопределить OpenRouter slug для любого
+  `ModelProfile` (например, `default_balanced` → `anthropic/claude-3.5-sonnet`).
+  Применяется в `Orchestrator.plan_async` без redeploy.
+- **Обновить список моделей** — `GET /api/v1/models` с принудительным
+  обновлением Redis-кеша (TTL 12 часов).
+- **Сбросить настройки** — `DELETE FROM app_settings WHERE key LIKE 'model_override.%'`.
+
+Архитектурно:
+
+- `app/core/settings_store.py` — хранилище (Redis 60s → PostgreSQL `app_settings` → ENV fallback).
+- `app/llm/openrouter_models.py` — список моделей с Redis-кешем 12h.
+- `app/bot/handlers/settings.py` — inline-меню и FSM (`MemoryStorage`).
+- `app/bot/filters/admin.py` — `AdminFilter` для всех handler-ов команды.
+
 `GET /diagnostics` возвращает JSON со статусом `postgres`/`redis`, версиями
 серверов, `schema_version` (Alembic head), `connection_sources` и набором
 boolean-флагов про токены. Никаких секретов / raw-URL не отдаётся.

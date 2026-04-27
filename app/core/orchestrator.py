@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from app.agents.schemas import AgentProfile
+from app.core.settings_store import get_settings_store
 from app.llm.openrouter_client import (
     OpenRouterClient,
     OpenRouterError,
@@ -90,6 +91,45 @@ class Orchestrator:
             max_tokens=max_tokens,
         )
 
+    async def plan_async(
+        self,
+        *,
+        agent: AgentProfile,
+        skill: SkillProfile,
+        explicit_model_id: str | None = None,
+    ) -> OrchestratorPlan:
+        """То же, что ``plan``, но дополнительно применяет model_override
+        из ``app_settings`` (если admin переопределил модель через /settings).
+
+        Override меняет только ``ModelProfile.model_name`` (OpenRouter slug),
+        остальные поля профиля сохраняются.
+        """
+        base_plan = self.plan(
+            agent=agent, skill=skill, explicit_model_id=explicit_model_id
+        )
+        store = get_settings_store()
+        override = await store.get_model_override(base_plan.model.id)
+        if not override:
+            return base_plan
+        # ModelProfile — frozen pydantic-модель; используем model_copy для
+        # точечной замены model_name.
+        try:
+            new_model = base_plan.model.model_copy(update={"model_name": override})
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "Failed to apply model_override '%s' for '%s'; using default",
+                override,
+                base_plan.model.id,
+            )
+            return base_plan
+        return OrchestratorPlan(
+            agent=base_plan.agent,
+            skill=base_plan.skill,
+            model=new_model,
+            temperature=base_plan.temperature,
+            max_tokens=base_plan.max_tokens,
+        )
+
     async def run(
         self,
         *,
@@ -102,12 +142,18 @@ class Orchestrator:
         Бросает ``OpenRouterError`` наружу — handler решает, что показать пользователю.
         """
         model = plan.model
+        # Подтягиваем актуальный API-ключ (БД → ENV) непосредственно перед запросом,
+        # чтобы admin /settings вступал в силу без рестарта процесса.
+        store = get_settings_store()
+        api_key = await store.get_openrouter_api_key()
+
         if model.supports_streaming:
             async for chunk in self._client.stream_chat_completion(
                 model=model.model_name,
                 messages=messages,
                 temperature=plan.temperature,
                 max_tokens=plan.max_tokens,
+                api_key_override=api_key,
             ):
                 yield chunk
         else:
@@ -116,6 +162,7 @@ class Orchestrator:
                 messages=messages,
                 temperature=plan.temperature,
                 max_tokens=plan.max_tokens,
+                api_key_override=api_key,
             )
             yield StreamingChunk(content_delta=result.content, finish_reason="stop")
 
