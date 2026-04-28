@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     TELEGRAM_WEBHOOK_PATH: str = "/telegram/webhook"
     TELEGRAM_WEBHOOK_SECRET: str = ""
 
+    # --- Background workers (ETH alerts / digest / notification outbox) ---
+    ETH_ALERT_WORKER_INTERVAL_SECONDS: int = 60
+    DAILY_DIGEST_WORKER_INTERVAL_SECONDS: int = 3600
+    NOTIFICATION_WORKER_INTERVAL_SECONDS: int = 10
+    NOTIFICATION_WORKER_BATCH_SIZE: int = 20
+
     # --- OpenRouter ---
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"

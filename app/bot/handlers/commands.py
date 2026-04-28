@@ -1,19 +1,22 @@
 """Хэндлеры команд: /start, /help, /reset, /status, /history, /agents, /agent,
-/skills, /skill, /models, /model.
+/skills, /skill, /models, /model, ETH alerts, digest, notifications.
 """
 
 from __future__ import annotations
 
 import logging
+from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.agents.registry import get_agent_registry
+from app.bot.notification_format import format_recent_notifications_text
 from app.bot.renderers.telegram_text import escape_html, send_long_html, send_plain
 from app.api.health import ready
 from app.config import get_settings
+from app.core.access_control import is_bot_access_allowed
 from app.core.agent_modes import (
     AGENT_MODE_AGENT,
     AGENT_MODE_DEFAULT,
@@ -31,10 +34,14 @@ from app.core.prompts import (
 )
 from app.core.settings_store import get_settings_store
 from app.db.models import (
+    ETH_ALERT_DIRECTION_ABOVE,
+    ETH_ALERT_DIRECTION_BELOW,
     MESSAGE_DIRECTION_INBOUND,
     MESSAGE_DIRECTION_OUTBOUND,
 )
 from app.db.repositories.chats import ChatRepository
+from app.db.repositories.eth_alerts import EthPriceAlertRepository
+from app.db.repositories.notification_outbox import NotificationOutboxRepository
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.llm_requests import LLMRequestRepository
 from app.db.repositories.messages import MessageRepository
@@ -231,6 +238,234 @@ async def cmd_new(message: Message, command: CommandObject) -> None:
             f"агент: <b>{escape_html(activation.agent.name)}</b>."
         ),
     )
+
+
+def _normalize_eth_alert_direction(token: str) -> str | None:
+    t = token.strip().lower()
+    if t in {"above", ">", "ge"}:
+        return ETH_ALERT_DIRECTION_ABOVE
+    if t in {"below", "<", "le"}:
+        return ETH_ALERT_DIRECTION_BELOW
+    return None
+
+
+def _parse_alert_eth_args(raw: str) -> tuple[Decimal, str] | None:
+    parts = raw.split()
+    if len(parts) < 2:
+        return None
+    a, b = parts[0], parts[1]
+    d1 = _normalize_eth_alert_direction(a)
+    d2 = _normalize_eth_alert_direction(b)
+    if d1 is not None:
+        try:
+            price = Decimal(b.replace(",", "."))
+        except InvalidOperation:
+            return None
+        if price <= 0:
+            return None
+        return price, d1
+    if d2 is not None:
+        try:
+            price = Decimal(a.replace(",", "."))
+        except InvalidOperation:
+            return None
+        if price <= 0:
+            return None
+        return price, d2
+    return None
+
+
+# ---------------------------------------------------------------------------
+# ETH alerts / digest / notifications (Stage 5 outbox)
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("alert_eth"))
+async def cmd_alert_eth(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    settings = get_settings()
+    if not is_bot_access_allowed(
+        telegram_user_id=message.from_user.id, settings=settings
+    ):
+        return
+
+    parsed = _parse_alert_eth_args((command.args or "").strip())
+    if parsed is None:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование:\n"
+            "/alert_eth &lt;цена_usd&gt; above|below\n"
+            "Пример: <code>/alert_eth 3500 above</code>",
+        )
+        return
+
+    price, direction = parsed
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        eth_repo = EthPriceAlertRepository(session)
+        user = await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        alert = await eth_repo.create_alert(
+            user_id=user.id,
+            telegram_chat_id=message.chat.id,
+            target_price_usd=price,
+            direction=direction,
+        )
+
+    sym = "≥" if direction == ETH_ALERT_DIRECTION_ABOVE else "≤"
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Алерт создан: ETH {sym} <b>${price}</b> (id <code>{alert.id}</code>). "
+        "Уведомление придёт через outbox после срабатывания.",
+    )
+
+
+@router.message(Command("alerts"))
+async def cmd_alerts(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    settings = get_settings()
+    if not is_bot_access_allowed(
+        telegram_user_id=message.from_user.id, settings=settings
+    ):
+        return
+
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        eth_repo = EthPriceAlertRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Алертов нет.")
+            return
+        alerts = await eth_repo.list_for_user(user.id, active_only=False)
+
+    if not alerts:
+        await send_plain(message.bot, message.chat.id, "Алертов нет.")
+        return
+
+    lines = ["<b>Твои ETH-алерты</b>", ""]
+    for a in alerts[:20]:
+        st = "active" if a.is_active else "done"
+        trig = a.triggered_at.isoformat() if a.triggered_at else "—"
+        lines.append(
+            f"• <code>{a.id}</code> — target <b>${a.target_price_usd}</b> "
+            f"{escape_html(a.direction)} — <b>{escape_html(st)}</b>\n"
+            f"  triggered: {escape_html(trig)}"
+        )
+    await send_plain(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("digest_on"))
+async def cmd_digest_on(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    settings = get_settings()
+    if not is_bot_access_allowed(
+        telegram_user_id=message.from_user.id, settings=settings
+    ):
+        return
+
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.upsert(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            language_code=message.from_user.language_code,
+        )
+        await user_repo.set_digest_channel(
+            user.id, enabled=True, telegram_chat_id=message.chat.id
+        )
+
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        "Ежедневный дайджест включён для этого чата. "
+        "Статус: /digest_status\n"
+        "Отключить: /digest_off",
+    )
+
+
+@router.message(Command("digest_off"))
+async def cmd_digest_off(message: Message) -> None:
+    if message.from_user is None:
+        return
+    settings = get_settings()
+    if not is_bot_access_allowed(
+        telegram_user_id=message.from_user.id, settings=settings
+    ):
+        return
+
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is not None:
+            await user_repo.set_digest_channel(
+                user.id, enabled=False, telegram_chat_id=None
+            )
+
+    await send_plain(message.bot, message.chat.id, "Дайджест выключен.")
+
+
+@router.message(Command("digest_status"))
+async def cmd_digest_status(message: Message) -> None:
+    if message.from_user is None:
+        return
+    settings = get_settings()
+    if not is_bot_access_allowed(
+        telegram_user_id=message.from_user.id, settings=settings
+    ):
+        return
+
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Дайджест выключен.")
+            return
+        en = user.digest_enabled
+        ch = user.digest_telegram_chat_id
+        last = user.last_digest_sent_at.isoformat() if user.last_digest_sent_at else "никогда"
+
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Дайджест: <b>{'on' if en else 'off'}</b>\n"
+        f"Чат: {escape_html(str(ch))}\n"
+        f"Последняя успешная доставка: {escape_html(last)}",
+    )
+
+
+@router.message(Command("notifications"))
+async def cmd_notifications(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    settings = get_settings()
+    if not is_bot_access_allowed(
+        telegram_user_id=message.from_user.id, settings=settings
+    ):
+        return
+
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        notif_repo = NotificationOutboxRepository(session)
+        user = await user_repo.get_by_telegram_id(message.from_user.id)
+        if user is None:
+            await send_plain(message.bot, message.chat.id, "Уведомлений пока нет.")
+            return
+        rows = await notif_repo.list_recent_for_user(user.id, limit=10)
+
+    text = format_recent_notifications_text(rows)
+    await send_plain(message.bot, message.chat.id, text)
 
 
 # ---------------------------------------------------------------------------

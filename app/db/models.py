@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -15,6 +16,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -51,6 +54,16 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     language_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
+    digest_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    last_digest_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    digest_telegram_chat_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
     )
@@ -65,6 +78,146 @@ class User(Base):
     conversations: Mapped[list["Conversation"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    eth_price_alerts: Mapped[list["EthPriceAlert"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    notifications: Mapped[list["NotificationOutbox"]] = relationship(
+        back_populates="user",
+        foreign_keys="NotificationOutbox.user_id",
+    )
+
+
+# ---------------------------------------------------------------------------
+# notification_outbox — durable Telegram notifications with retries
+# ---------------------------------------------------------------------------
+
+NOTIFICATION_TYPE_ETH_ALERT = "eth_alert"
+NOTIFICATION_TYPE_DAILY_DIGEST = "daily_digest"
+NOTIFICATION_TYPE_SYSTEM = "system"
+
+NOTIFICATION_STATUS_PENDING = "pending"
+NOTIFICATION_STATUS_PROCESSING = "processing"
+NOTIFICATION_STATUS_SENT = "sent"
+NOTIFICATION_STATUS_FAILED = "failed"
+
+
+class NotificationOutbox(Base):
+    __tablename__ = "notification_outbox"
+    __table_args__ = (
+        Index(
+            "ix_notification_outbox_status_next_retry",
+            "status",
+            "next_retry_at",
+        ),
+        Index("ix_notification_outbox_notification_type", "notification_type"),
+        Index("ix_notification_outbox_telegram_chat_id", "telegram_chat_id"),
+        Index("ix_notification_outbox_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    notification_type: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default=NOTIFICATION_STATUS_PENDING
+    )
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    body_text: Mapped[str] = mapped_column("text", Text, nullable=False)
+    parse_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_retries: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5, server_default=text("5")
+    )
+
+    next_retry_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+    user: Mapped[User | None] = relationship(
+        back_populates="notifications",
+        foreign_keys=[user_id],
+    )
+
+
+# ---------------------------------------------------------------------------
+# eth_price_alerts
+# ---------------------------------------------------------------------------
+
+ETH_ALERT_DIRECTION_ABOVE = "above"
+ETH_ALERT_DIRECTION_BELOW = "below"
+
+
+class EthPriceAlert(Base):
+    __tablename__ = "eth_price_alerts"
+    __table_args__ = (
+        Index("ix_eth_price_alerts_user_id", "user_id"),
+        Index("ix_eth_price_alerts_active", "is_active"),
+        Index("ix_eth_price_alerts_telegram_chat_id", "telegram_chat_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_price_usd: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notification_outbox_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("notification_outbox.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+    user: Mapped[User] = relationship(back_populates="eth_price_alerts")
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +521,17 @@ class UserAgentSetting(Base):
 __all__ = [
     "Base",
     "User",
+    "NotificationOutbox",
+    "EthPriceAlert",
+    "NOTIFICATION_TYPE_ETH_ALERT",
+    "NOTIFICATION_TYPE_DAILY_DIGEST",
+    "NOTIFICATION_TYPE_SYSTEM",
+    "NOTIFICATION_STATUS_PENDING",
+    "NOTIFICATION_STATUS_PROCESSING",
+    "NOTIFICATION_STATUS_SENT",
+    "NOTIFICATION_STATUS_FAILED",
+    "ETH_ALERT_DIRECTION_ABOVE",
+    "ETH_ALERT_DIRECTION_BELOW",
     "Chat",
     "Conversation",
     "Message",

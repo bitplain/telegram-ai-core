@@ -56,7 +56,11 @@ HELP_MESSAGE = (
     "/skills — список навыков\n"
     "/skill &lt;id&gt; — выбрать навык\n"
     "/models — список моделей\n"
-    "/model &lt;id&gt; — выбрать модель\n\n"
+    "/model &lt;id&gt; — выбрать модель\n"
+    "/alert_eth &lt;цена&gt; above|below — ETH ценовой алерт\n"
+    "/alerts — список алертов\n"
+    "/digest_on /digest_off /digest_status — ежедневный дайджест\n"
+    "/notifications — последние durable-уведомления (outbox)\n\n"
     "Можно также использовать прямые алиасы навыков: /chat, /fast, /crypto, "
     "/finance, /news, /devops, /infra."
 )
