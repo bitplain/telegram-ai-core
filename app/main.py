@@ -18,6 +18,11 @@ from fastapi import FastAPI
 from app.api.diagnostics import router as diagnostics_router
 from app.api.health import router as health_router
 from app.api.telegram_webhook import router as telegram_webhook_router
+from app.bot.background_workers import (
+    daily_digest_worker_loop,
+    eth_alert_worker_loop,
+    notification_delivery_worker_loop,
+)
 from app.bot.bot_factory import create_bot
 from app.bot.dispatcher import create_dispatcher
 from app.bot.polling import start_polling
@@ -49,6 +54,9 @@ async def lifespan(app: FastAPI):
     bot = None
     dispatcher = None
     polling_task: asyncio.Task | None = None
+    eth_alert_task: asyncio.Task | None = None
+    daily_digest_task: asyncio.Task | None = None
+    notification_delivery_task: asyncio.Task | None = None
 
     if settings.TELEGRAM_BOT_TOKEN:
         bot = create_bot(settings.TELEGRAM_BOT_TOKEN)
@@ -56,6 +64,12 @@ async def lifespan(app: FastAPI):
             dispatcher = create_dispatcher()
             app.state.bot = bot
             app.state.dispatcher = dispatcher
+
+            notification_delivery_task = asyncio.create_task(
+                notification_delivery_worker_loop(bot),
+                name="notification-delivery",
+            )
+            log.info("notification delivery worker started")
 
             if settings.TELEGRAM_MODE == "polling":
                 polling_task = asyncio.create_task(
@@ -69,10 +83,36 @@ async def lifespan(app: FastAPI):
     else:
         log.warning("TELEGRAM_BOT_TOKEN is empty, polling is disabled.")
 
+    eth_alert_task = asyncio.create_task(
+        eth_alert_worker_loop(), name="eth-alert-worker"
+    )
+    daily_digest_task = asyncio.create_task(
+        daily_digest_worker_loop(), name="daily-digest-worker"
+    )
+    log.info("ETH alert and daily digest background workers started")
+
     try:
         yield
     finally:
         log.info("Shutting down")
+        if notification_delivery_task is not None:
+            notification_delivery_task.cancel()
+            try:
+                await notification_delivery_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if eth_alert_task is not None:
+            eth_alert_task.cancel()
+            try:
+                await eth_alert_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if daily_digest_task is not None:
+            daily_digest_task.cancel()
+            try:
+                await daily_digest_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if polling_task is not None:
             polling_task.cancel()
             try:

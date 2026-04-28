@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -64,3 +65,25 @@ class UserRepository:
             user.updated_at = now
             await self._session.flush()
         return user
+
+    async def set_digest_channel(
+        self, user_id: uuid.UUID, *, enabled: bool, telegram_chat_id: int | None
+    ) -> None:
+        user = await self._session.get(User, user_id)
+        if user is None:
+            return
+        user.digest_enabled = enabled
+        if telegram_chat_id is not None:
+            user.digest_telegram_chat_id = telegram_chat_id
+        user.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+
+    async def update_last_digest_sent_at(
+        self, user_id: uuid.UUID, sent_at: datetime
+    ) -> None:
+        user = await self._session.get(User, user_id)
+        if user is None:
+            return
+        user.last_digest_sent_at = sent_at
+        user.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()

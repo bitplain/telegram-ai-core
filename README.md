@@ -284,6 +284,24 @@ active_model_id=default_balanced
   `final_message_sent`, `llm_request_success/error` без токенов, ключей,
   полного prompt или длинного пользовательского текста.
 
+## Notification outbox (Stage 5)
+
+ETH price alerts и ежедневный digest **не шлют Telegram напрямую** из detection-воркеров. При срабатывании или готовности digest создаётся запись в таблице `notification_outbox`; отдельный **notification delivery worker** читает очередь (`FOR UPDATE SKIP LOCKED`), вызывает `send_message`, при ошибках делает **exponential backoff** до `max_retries`, после чего помечает запись как окончательно проваленную.
+
+- `NOTIFICATION_WORKER_INTERVAL_SECONDS` — пауза между циклами доставки (по умолчанию 10).
+- `NOTIFICATION_WORKER_BATCH_SIZE` — сколько записей забирать за итерацию (по умолчанию 20).
+
+Фоновые воркеры (цена ETH с CoinGecko):
+
+- `ETH_ALERT_WORKER_INTERVAL_SECONDS` — опрос активных алертов.
+- `DAILY_DIGEST_WORKER_INTERVAL_SECONDS` — проверка пользователей с включённым digest.
+
+Digest: `last_digest_sent_at` обновляется **только после успешной доставки** `daily_digest` в Telegram, чтобы не терять день при сбое отправки. Дубликаты digest на один UTC-день на пользователя не создаются (проверка по `payload_json.digest_date` и статусам pending/processing/sent).
+
+Команда **`/notifications`** показывает последние 10 уведомлений пользователя (тип, статус, retries, время); полный текст и payload в чат не выводятся.
+
+**Ограничения MVP:** один индикатор (ETH USD) в digest; нет портфельной аналитики; при падении CoinGecko уведомления просто откладываются до следующего тика воркера.
+
 ## Команды бота
 
 - `/start`, `/help` — приветствие и справка.
@@ -299,6 +317,10 @@ active_model_id=default_balanced
 - `/ask crypto <текст>`, `/ask news <текст>` — одноразовый вопрос агенту без смены режима.
 - `/skills`, `/skill <id>` — список и переключение skill.
 - `/models`, `/model <id>` — список и переключение модели (только если она в `allowed_model_ids` активного агента).
+- `/alert_eth <usd> above|below` — создать ценовой алерт по ETH; доставка через outbox.
+- `/alerts` — список алертов.
+- `/digest_on`, `/digest_off`, `/digest_status` — ежедневный дайджест в текущий чат (доставка через outbox).
+- `/notifications` — последние outbox-уведомления (метаданные без полного текста).
 - Алиасы skill-ов: `/chat`, `/fast`, `/crypto`, `/finance`, `/news`, `/devops`, `/infra`.
 - `/settings` — admin-only inline-меню (см. ниже).
 
