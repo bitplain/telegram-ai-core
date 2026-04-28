@@ -5,14 +5,16 @@
 from __future__ import annotations
 
 import logging
+from datetime import timezone
+from decimal import Decimal
 
+import httpx
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.agents.registry import get_agent_registry
 from app.bot.renderers.telegram_text import escape_html, send_long_html, send_plain
-from app.api.health import ready
 from app.config import get_settings
 from app.core.agent_modes import (
     AGENT_MODE_AGENT,
@@ -39,6 +41,11 @@ from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.llm_requests import LLMRequestRepository
 from app.db.repositories.messages import MessageRepository
 from app.db.repositories.users import UserRepository
+from app.bot.handlers.portfolio_helpers import parse_add_eth_amount
+from app.core.alert_logic import parse_positive_usd_price, resolve_alert_direction
+from app.core.price.eth import fetch_eth_usd_price
+from app.db.repositories.eth_alerts import EthAlertRepository
+from app.utils.formatting import format_decimal
 from app.db.session import session_scope
 from app.redis.client import ping as redis_ping
 from app.models.registry import get_model_registry
@@ -854,6 +861,201 @@ async def cmd_model(message: Message, command: CommandObject) -> None:
         message.chat.id,
         f"Активная модель изменена: <b>{escape_html(model.display_name)}</b>.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: portfolio, alerts, digest
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("portfolio"))
+async def cmd_portfolio(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        u = await user_repo.get_by_telegram_id(message.from_user.id)
+
+        bal = Decimal(u.eth_balance) if u else Decimal(0)
+    import httpx
+
+    price = None
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as hc:
+        price = await fetch_eth_usd_price(client=hc)
+    lines = [
+        "<b>Портфель (ручной учёт)</b>",
+        f"ETH: <b>{format_decimal(bal)}</b>",
+    ]
+    if price is not None:
+        lines.append(f"Цена ETH (CoinGecko): ~<b>{format_decimal(price)}</b> USD")
+        lines.append(
+            f"Оценка в USD: ~<b>{format_decimal(bal * price)}</b> "
+            "(индикативно, не инвестсовет)."
+        )
+    else:
+        lines.append("Цена ETH сейчас недоступна (CoinGecko).")
+    await send_plain(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("add_eth"))
+async def cmd_add_eth(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    amount, err = parse_add_eth_amount(command.args)
+    if err:
+        await send_plain(message.bot, message.chat.id, err)
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        await user_repo.add_eth_balance(
+            telegram_user_id=message.from_user.id, delta=amount
+        )
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Баланс увеличен на <b>{format_decimal(amount)}</b> ETH. См. /portfolio.",
+    )
+
+
+@router.message(Command("alert_eth"))
+async def cmd_alert_eth(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    target, err = parse_positive_usd_price(command.args)
+    if err:
+        await send_plain(message.bot, message.chat.id, err)
+        return
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as hc:
+        current = await fetch_eth_usd_price(client=hc)
+    if current is None:
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Текущая цена ETH недоступна (CoinGecko). Алерт не создан.",
+        )
+        return
+    direction, derr = resolve_alert_direction(target=target, current=current)
+    if derr:
+        await send_plain(message.bot, message.chat.id, derr)
+        return
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        u = await user_repo.get_by_telegram_id(message.from_user.id)
+        if u is None:
+            return
+        ar = EthAlertRepository(session)
+        await ar.create(user_id=u.id, target_price_usd=target, direction=direction)
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        (
+            f"Алерт создан: цель <b>{format_decimal(target)}</b> USD, "
+            f"сейчас ~<b>{format_decimal(current)}</b> USD, направление: <b>{direction}</b>."
+        ),
+    )
+
+
+@router.message(Command("alerts"))
+async def cmd_alerts(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        u = await user_repo.get_by_telegram_id(message.from_user.id)
+        if u is None:
+            return
+        ar = EthAlertRepository(session)
+        rows = await ar.list_active_for_user(user_id=u.id)
+    if not rows:
+        await send_plain(message.bot, message.chat.id, "Активных ETH-алертов нет.")
+        return
+    lines = ["<b>Активные ETH-алерты:</b>"]
+    for r in rows:
+        lines.append(
+            f"• цель <b>{format_decimal(r.target_price_usd)}</b> USD, "
+            f"направление <code>{escape_html(r.direction)}</code>"
+        )
+    await send_plain(message.bot, message.chat.id, "\n".join(lines))
+
+
+@router.message(Command("alert_cancel"))
+async def cmd_alert_cancel(message: Message, command: CommandObject) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    args = (command.args or "").strip().lower()
+    if args != "all":
+        await send_plain(
+            message.bot,
+            message.chat.id,
+            "Использование: /alert_cancel all",
+        )
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        u = await user_repo.get_by_telegram_id(message.from_user.id)
+        if u is None:
+            return
+        ar = EthAlertRepository(session)
+        n = await ar.deactivate_all_for_user(user_id=u.id)
+    await send_plain(
+        message.bot,
+        message.chat.id,
+        f"Деактивировано алертов: <b>{n}</b>.",
+    )
+
+
+@router.message(Command("digest_on"))
+async def cmd_digest_on(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        await user_repo.set_digest_enabled(
+            telegram_user_id=message.from_user.id, enabled=True
+        )
+    await send_plain(message.bot, message.chat.id, "Ежедневный digest включён.")
+
+
+@router.message(Command("digest_off"))
+async def cmd_digest_off(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        await user_repo.set_digest_enabled(
+            telegram_user_id=message.from_user.id, enabled=False
+        )
+    await send_plain(message.bot, message.chat.id, "Ежедневный digest выключен.")
+
+
+@router.message(Command("digest_status"))
+async def cmd_digest_status(message: Message) -> None:
+    if message.from_user is None or message.chat is None:
+        return
+    await _ensure_conversation(message)
+    settings = get_settings()
+    async with session_scope() as session:
+        user_repo = UserRepository(session)
+        u = await user_repo.get_by_telegram_id(message.from_user.id)
+        enabled = bool(u.digest_enabled) if u else False
+        last = u.last_digest_sent_at if u else None
+    last_s = "—"
+    if last is not None:
+        last_s = last.astimezone(timezone.utc).isoformat()
+    lines = [
+        "<b>Digest</b>",
+        f"Включён: <b>{'да' if enabled else 'нет'}</b>",
+        f"DAILY_DIGEST_HOUR_UTC: <code>{settings.DAILY_DIGEST_HOUR_UTC}</code>",
+        f"last_digest_sent_at: <code>{escape_html(last_s)}</code>",
+    ]
+    await send_plain(message.bot, message.chat.id, "\n".join(lines))
 
 
 __all__ = ["router"]

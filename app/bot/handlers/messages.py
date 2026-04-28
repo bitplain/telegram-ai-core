@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
+import httpx
 from aiogram import F, Router
 from aiogram.types import Message
 
@@ -21,6 +23,9 @@ from app.core.prompts import (
 )
 from app.core.rate_limit import RateLimiter
 from app.core.usage_limits import UsageLimiter
+from app.core.price.eth import fetch_eth_usd_price
+from app.core.quick_intent import classify_quick_intent
+from app.core.services.crypto_context import build_crypto_context_block
 from app.core.services.user_agent_settings import UserAgentSettingsService
 from app.core.settings_store import get_settings_store
 from app.db.models import (
@@ -34,6 +39,7 @@ from app.db.repositories.llm_requests import LLMRequestRepository
 from app.db.repositories.messages import MessageRepository
 from app.db.repositories.users import UserRepository
 from app.db.session import session_scope
+from app.utils.formatting import format_decimal
 from app.llm.openrouter_client import (
     OpenRouterAuthError,
     OpenRouterError,
@@ -146,6 +152,40 @@ async def process_user_message(
                 conversation_id=conversation_id,
                 **runtime_context.conversation_patch,
             )
+        conversation = await conv_repo.get_or_create_active(
+            user_id=user_id, chat_id=chat_id
+        )
+
+    qi = classify_quick_intent(text, active_mode=conversation.active_mode)
+    if qi.matched and qi.kind == "portfolio":
+        async with session_scope() as session:
+            user_repo = UserRepository(session)
+            u = await user_repo.get_by_telegram_id(message.from_user.id)
+            bal = Decimal(u.eth_balance) if u else Decimal(0)
+        price = None
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as hc:
+            price = await fetch_eth_usd_price(client=hc)
+        lines = [
+            "<b>Портфель (ручной учёт)</b>",
+            f"ETH: <b>{format_decimal(bal)}</b>",
+        ]
+        if price is not None:
+            lines.append(f"Цена ETH (CoinGecko): ~<b>{format_decimal(price)}</b> USD")
+            lines.append(
+                f"Оценка в USD: ~<b>{format_decimal(bal * price)}</b> "
+                "(индикативно, не инвестсовет)."
+            )
+        else:
+            lines.append("Цена ETH сейчас недоступна (CoinGecko).")
+        await send_plain(message.bot, message.chat.id, "\n".join(lines))
+        return
+
+    if qi.matched and qi.kind == "crypto_market" and one_shot_agent_id is None:
+        runtime_context = resolve_runtime_context(
+            conversation=conversation,
+            message_text=text,
+            one_shot_agent_id="crypto",
+        )
 
     # 4) Routing: agent-mode не запускает keyword matching, default-mode живёт как раньше.
     skill = runtime_context.skill_profile
@@ -229,11 +269,21 @@ async def process_user_message(
             user_id=user_id, chat_id=chat_id
         )
         await cb.resolve_agent(conversation)
+        crypto_block = None
+        if agent.id == "crypto":
+            user_repo = UserRepository(session)
+            urow = await user_repo.get_by_telegram_id(message.from_user.id)
+            bal = Decimal(urow.eth_balance) if urow else Decimal(0)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as hc:
+                crypto_block = await build_crypto_context_block(
+                    eth_balance=bal, httpx_client=hc
+                )
         messages_payload = await cb.build_messages(
             conversation=conversation,
             agent=agent,
             history_agent_id=agent.id,
             system_prompt_override=effective_agent_settings.effective_prompt,
+            crypto_context_block=crypto_block,
         )
 
     # 7) Стартуем LLM-стрим и рендерим в Telegram.

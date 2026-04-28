@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from app.api.diagnostics import router as diagnostics_router
 from app.api.health import router as health_router
 from app.api.telegram_webhook import router as telegram_webhook_router
+from app.bot.background_workers import daily_digest_worker_loop, eth_alert_worker_loop
 from app.bot.bot_factory import create_bot
 from app.bot.dispatcher import create_dispatcher
 from app.bot.polling import start_polling
@@ -49,6 +50,8 @@ async def lifespan(app: FastAPI):
     bot = None
     dispatcher = None
     polling_task: asyncio.Task | None = None
+    alert_task: asyncio.Task | None = None
+    digest_task: asyncio.Task | None = None
 
     if settings.TELEGRAM_BOT_TOKEN:
         bot = create_bot(settings.TELEGRAM_BOT_TOKEN)
@@ -64,6 +67,13 @@ async def lifespan(app: FastAPI):
                 log.info("Telegram polling task started")
             else:
                 log.info("Telegram mode=webhook — polling not started")
+
+            alert_task = asyncio.create_task(
+                eth_alert_worker_loop(bot), name="eth-alert-worker"
+            )
+            digest_task = asyncio.create_task(
+                daily_digest_worker_loop(bot), name="daily-digest-worker"
+            )
         else:
             log.warning("Failed to create bot instance")
     else:
@@ -73,13 +83,19 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info("Shutting down")
-        if polling_task is not None:
-            polling_task.cancel()
-            try:
-                await polling_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                # CancelledError ожидаем; прочие ошибки уже залогированы в polling.
-                pass
+        for name, t in (
+            ("telegram-polling", polling_task),
+            ("eth-alert-worker", alert_task),
+            ("daily-digest-worker", digest_task),
+        ):
+            if t is not None:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    log.warning("Background task %s ended with error", name)
 
         if bot is not None:
             try:

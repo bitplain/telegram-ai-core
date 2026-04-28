@@ -186,7 +186,12 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ACTION_INTERVAL_SECONDS: float = 4.0
     TELEGRAM_MESSAGE_MAX_CHARS: int = 3900
 
-    # ------------------------------------------------------------------
+    # --- Stage 4: crypto portfolio / news / digest / alerts ---
+    CRYPTOPANIC_API_KEY: str = ""
+    ETH_ALERT_CHECK_INTERVAL_SECONDS: int = 300
+    DAILY_DIGEST_ENABLED: bool = True
+    DAILY_DIGEST_HOUR_UTC: int = 8
+    DAILY_DIGEST_POLL_INTERVAL_SECONDS: int = 900
     # Computed helpers
     # ------------------------------------------------------------------
 

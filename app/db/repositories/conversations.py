@@ -35,6 +35,21 @@ class ConversationRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_active_for_update(
+        self, *, user_id: uuid.UUID, chat_id: uuid.UUID
+    ) -> Conversation | None:
+        stmt = (
+            select(Conversation)
+            .where(
+                Conversation.user_id == user_id,
+                Conversation.chat_id == chat_id,
+                Conversation.status == CONVERSATION_STATUS_ACTIVE,
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_or_create_active(
         self,
         *,

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
+from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User
@@ -15,6 +17,11 @@ class UserRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get_by_id(self, user_id: UUID) -> User | None:
+        stmt = select(User).where(User.id == user_id)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def get_by_telegram_id(self, telegram_user_id: int) -> User | None:
         stmt = select(User).where(User.telegram_user_id == telegram_user_id)
@@ -64,3 +71,35 @@ class UserRepository:
             user.updated_at = now
             await self._session.flush()
         return user
+
+    async def add_eth_balance(
+        self, *, telegram_user_id: int, delta: Decimal
+    ) -> User | None:
+        user = await self.get_by_telegram_id(telegram_user_id)
+        if user is None:
+            return None
+        user.eth_balance = Decimal(user.eth_balance) + delta
+        user.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+        return user
+
+    async def set_digest_enabled(
+        self, *, telegram_user_id: int, enabled: bool
+    ) -> User | None:
+        user = await self.get_by_telegram_id(telegram_user_id)
+        if user is None:
+            return None
+        user.digest_enabled = enabled
+        user.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
+        return user
+
+    async def update_last_digest_sent_at(
+        self, *, user_id: UUID, sent_at: datetime
+    ) -> None:
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(last_digest_sent_at=sent_at, updated_at=sent_at)
+        )
+        await self._session.execute(stmt)

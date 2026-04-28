@@ -1,0 +1,1 @@
+"""Concrete news provider implementations."""

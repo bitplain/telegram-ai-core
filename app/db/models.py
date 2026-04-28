@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -15,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -51,6 +53,22 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     language_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
+    eth_balance: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18),
+        nullable=False,
+        default=Decimal("0"),
+        server_default=text("0"),
+    )
+    digest_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    last_digest_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
     )
@@ -65,6 +83,56 @@ class User(Base):
     conversations: Mapped[list["Conversation"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    eth_price_alerts: Mapped[list["EthPriceAlert"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+# ---------------------------------------------------------------------------
+# eth_price_alerts
+# ---------------------------------------------------------------------------
+
+
+class EthPriceAlert(Base):
+    __tablename__ = "eth_price_alerts"
+    __table_args__ = (
+        Index(
+            "ix_eth_price_alerts_user_active",
+            "user_id",
+            unique=False,
+            postgresql_where=text("is_active = true AND triggered_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_price_usd: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+    user: Mapped[User] = relationship(back_populates="eth_price_alerts")
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +436,7 @@ class UserAgentSetting(Base):
 __all__ = [
     "Base",
     "User",
+    "EthPriceAlert",
     "Chat",
     "Conversation",
     "Message",
